@@ -1174,9 +1174,10 @@ public class LivePhotoSaverPlugin: NSObject, FlutterPlugin {
     }
 
     // 结构元半径：必须比笔画宽度的一半更大，否则笔画会"活过"开运算、
-    // 顶帽在笔画内部塌成 0 → 字芯残留。笔画宽 ≈ lineH/8 左右，
-    // 这里取 kr = lineH/8（约 2 倍安全余量），并按字号夹在 4~24。
-    let kr = max(4, min(24, max(1, lineH / 8)))
+    // 顶帽在笔画内部塌成 0 → 字芯残留。笔画宽 ≈ lineH/8，故取 kr ≈ lineH/14
+    // （kernel ≈ lineH/7，约 1.1~1.6 倍笔画宽，实测最平衡）。
+    // ⚠️ 别贪大：kr 越大，格纹/琴弦这类"细亮纹理"也会被顶帽选中 → 掩码外溢。
+    let kr = max(4, min(12, max(1, lineH / 14)))
     var healedAny = false
 
     // 两遍：主阈值 → 残影弱阈值
@@ -1184,8 +1185,10 @@ public class LivePhotoSaverPlugin: NSObject, FlutterPlugin {
       // 开运算：腐蚀(取min) 再膨胀(取max) → 抹掉细亮结构
       let ero = morph(lum, kr, true)
       let opening = morph(ero, kr, false)
-      let tTop = pass == 0 ? 16 : 10        // 顶帽强度下限
-      let tAlpha = pass == 0 ? 0.15 : 0.09  // 白字覆盖率下限
+      // 实测（wb_real_0 白裙+格纹）：α 阈值 0.15 会把格纹高光全选进来，
+      // 0.35 时掩码紧贴字形、几乎不外溢 → 用 0.35；第二遍残影降到 0.22。
+      let tTop = pass == 0 ? 18 : 12        // 顶帽强度下限
+      let tAlpha = pass == 0 ? 0.35 : 0.22  // 白字覆盖率下限
 
       var cand = [Bool](repeating: false, count: lw * lh)
       for y in ey0...ey1 {
