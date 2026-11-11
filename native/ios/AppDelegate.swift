@@ -1173,8 +1173,10 @@ public class LivePhotoSaverPlugin: NSObject, FlutterPlugin {
       return out
     }
 
-    // 结构元半径 ≈ 笔画宽度的一半（笔画约 2~4 个 lineH/10）
-    let kr = max(4, min(11, lineH / 6))
+    // 结构元半径：必须比笔画宽度的一半更大，否则笔画会"活过"开运算、
+    // 顶帽在笔画内部塌成 0 → 字芯残留。笔画宽 ≈ lineH/8 左右，
+    // 这里取 kr = lineH/8（约 2 倍安全余量），并按字号夹在 4~24。
+    let kr = max(4, min(24, max(1, lineH / 8)))
     var healedAny = false
 
     // 两遍：主阈值 → 残影弱阈值
