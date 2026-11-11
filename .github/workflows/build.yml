@@ -38,7 +38,7 @@ jobs:
       - name: 编译（免签名）
         env:
           APP_VER: "1.2.0"
-          APP_BUILD: "114"
+          APP_BUILD: "115"
         run: |
           # 版本号：name 由本文件维护，build number 用 CI 运行号自动递增（每次构建必然不同）
           flutter build ios --release --no-codesign \
