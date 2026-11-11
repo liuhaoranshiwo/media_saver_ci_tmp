@@ -1,0 +1,62 @@
+name: build
+# 手动触发：Actions 页面 → build → Run workflow
+# 产物：media_saver_ios_ipa（未签名 IPA，巨魔/TrollStore 直接安装）
+# 仅 iOS（应用户要求，不做 Android）
+on:
+  workflow_dispatch:
+
+jobs:
+  ios:
+    name: iOS 未签名 IPA（巨魔安装）
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.5"
+          channel: stable
+          cache: true
+
+      - name: 生成 iOS 平台目录
+        run: flutter create . --org com.mediastack --project-name media_saver --platforms ios
+
+      - name: 注入原生代码与相册权限
+        run: |
+          cp native/ios/AppDelegate.swift ios/Runner/AppDelegate.swift
+          /usr/libexec/PlistBuddy -c "Add :NSPhotoLibraryAddUsageDescription string 用于将解析的图片、视频和实况照片保存到你的相册" ios/Runner/Info.plist
+          # ATS 豁免：部分微博视频/封面直链仍为 http://（代码已 https 化，此处兜底）
+          /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" ios/Runner/Info.plist 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true" ios/Runner/Info.plist 2>/dev/null || true
+          # 部署目标提到 iOS 14（PHPhotoLibrary addOnly / .limited 需要）
+          /usr/bin/sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = 12.0/IPHONEOS_DEPLOYMENT_TARGET = 14.0/g' ios/Runner.xcodeproj/project.pbxproj
+          /usr/bin/sed -i '' "s/platform :ios, '12.0'/platform :ios, '14.0'/" ios/Podfile || true
+          # Xcode 16（macos-15 镜像）下 --no-codesign 仍要求 Development Team，
+          # 显式声明 Manual + 空签名身份，彻底关闭代码签名
+          /usr/bin/sed -i '' 's/CODE_SIGN_STYLE = Automatic;/CODE_SIGN_STYLE = Manual; CODE_SIGN_IDENTITY = ""; CODE_SIGNING_REQUIRED = NO; CODE_SIGNING_ALLOWED = NO;/g' ios/Runner.xcodeproj/project.pbxproj
+
+      - name: 编译（免签名）
+        env:
+          APP_VER: "1.2.0"
+          APP_BUILD: "113"
+        run: |
+          # 版本号：name 由本文件维护，build number 用 CI 运行号自动递增（每次构建必然不同）
+          flutter build ios --release --no-codesign \
+            --build-number="$APP_BUILD" \
+            --dart-define=APP_VERSION="$APP_VER" \
+            --dart-define=APP_BUILD="$APP_BUILD"
+          echo "构建版本: v$APP_VER ($APP_BUILD)"
+
+      - name: 打包未签名 IPA
+        run: |
+          cd build/ios/iphoneos
+          mkdir Payload
+          cp -r Runner.app Payload/
+          zip -qry "$GITHUB_WORKSPACE/media_saver_ios.ipa" Payload
+          echo "IPA 内 Info.plist 版本：" && /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Runner.app/Info.plist && /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" Runner.app/Info.plist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media_saver_ios_ipa
+          path: media_saver_ios.ipa
+

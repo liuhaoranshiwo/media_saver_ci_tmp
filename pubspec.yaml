@@ -1,0 +1,25 @@
+name: media_saver
+description: "原存 - 小红书/微博/抖音/闲鱼 去水印解析与原图/原视频/Live图保存工具（仅供个人学习与保存自己有权使用的内容）"
+publish_to: "none"
+version: 1.2.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  path_provider: ^2.1.2
+  video_player: ^2.8.2
+  flutter_inappwebview: 6.0.0 # 钉版本：6.1+ 要求 Dart>=3.5，与本工程 Flutter 3.22 (Dart 3.4) 冲突
+  shared_preferences: ^2.2.2
+  cupertino_icons: ^1.0.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
