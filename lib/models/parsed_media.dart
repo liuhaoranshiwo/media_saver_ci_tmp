@@ -15,6 +15,9 @@ class ParsedMediaItem {
   /// livePhoto 专用：配对的实况视频地址（MOV/MP4）
   final String? companionUrl;
 
+  /// livePhoto 专用：实况视频的候选链（主域 403 时换备份域）
+  final List<String> companionFallbackUrls;
+
   /// video 封面
   final String? coverUrl;
 
@@ -37,6 +40,7 @@ class ParsedMediaItem {
     required this.kind,
     required this.url,
     this.companionUrl,
+    this.companionFallbackUrls = const [],
     this.coverUrl,
     this.audioUrl,
     this.width,

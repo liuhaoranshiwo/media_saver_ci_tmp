@@ -196,36 +196,56 @@ class XiaohongshuParser extends MediaParser {
     if (items.isEmpty) {
       final imageList = note['imageList'] as List? ?? const [];
       for (final raw in imageList) {
-        final img = raw as Map<String, dynamic>;
-        // 2026-11 改版后 urlDefault 可能为空串，需按序回退到 url/urlPre
-        String? imageUrl;
-        for (final k in ['urlDefault', 'url', 'urlPre']) {
-          final v = img[k];
-          if (v is String && v.isNotEmpty) {
-            imageUrl = v;
-            break;
+        final img = (raw as Map).cast<String, dynamic>();
+        // 2026-11 改版后 urlDefault 可能为空串甚至不存在，需按序回退到 url/urlPre
+        var imageUrl = _firstString(img, ['urlDefault', 'url', 'urlPre']);
+        // 实况图个别笔记只给视频不给静态帧：退化为纯视频条目，别整条丢掉
+        if (imageUrl == null) {
+          final lv = _liveVideoCandidates(img);
+          if (lv.isNotEmpty) {
+            items.add(ParsedMediaItem(
+              kind: MediaKind.video,
+              url: lv.first,
+              fallbackUrls: lv.sublist(1),
+              ext: 'mp4',
+              width: (img['width'] as num?)?.toInt(),
+              height: (img['height'] as num?)?.toInt(),
+            ));
           }
+          continue;
         }
-        if (imageUrl == null) continue;
-        final isLive =
-            img['livePhoto'] == true || img['livePhoto'] == 'true';
-        final liveUrl = img['livePhotoUrl'] as String?;
-        // 2026-11-06 实测：urlDefault 带 CDN 处理参数（!nd_dft_wlteh_webp_3
-        // 或 ?imageView2/2/w/1080/format/webp）——是压缩版！
-        // 去掉参数后同一资源返回原始上传文件（506KB→916KB 实测）
-        final candidates = _originalCandidates(imageUrl);
-        // 诊断：记录原图直链是否拼出来了（候选>1 且首选为 sns-img 域 = 拼出）
-        final firstHost = Uri.tryParse(candidates.first)?.host ?? '?';
-        AppLogger.log('xhs',
-            '图${items.length + 1}: 候选${candidates.length}个 首选=$firstHost '
-            '原始=${Uri.tryParse(imageUrl)?.host ?? '?'}');
+
+        // 实况视频（2026-11-11 修）：新版 H5 的 imageList[i] 上已经没有
+        // livePhotoUrl 字段了 —— 实况视频在 `stream`（h264/h265 数组），
+        // 普通图该字段是空对象 {}。旧代码只认 livePhotoUrl，导致
+        // "live 图提取不到"（永远判成普通图片）。
+        final liveCandidates = _liveVideoCandidates(img);
+        final isLive = liveCandidates.isNotEmpty ||
+            img['livePhoto'] == true ||
+            img['livePhoto'] == 'true';
+
+        // 原图直链：优先用 imageList[i].fileId（页面稳定字段，含相对路径），
+        // 没有再从 H5 地址反推 —— 目标只有一个：拿到无水印原始上传文件
+        final fidRaw = img['fileId'];
+        final fileId = fidRaw is String ? fidRaw.trim() : null;
+        final candidates = _originalCandidates(imageUrl, fileId: fileId);
+        final fidShow = fileId ?? '-';
+        AppLogger.log(
+            'xhs',
+            '图${items.length + 1}: 候选${candidates.length}个 '
+            '首选=${Uri.tryParse(candidates.first)?.host ?? '?'} '
+            'fid=${fidShow.length > 48 ? fidShow.substring(0, 48) : fidShow} '
+            'live=${liveCandidates.length}');
         items.add(ParsedMediaItem(
-          kind: isLive && liveUrl != null
+          kind: isLive && liveCandidates.isNotEmpty
               ? MediaKind.livePhoto
               : MediaKind.image,
           url: candidates.first,
           fallbackUrls: candidates.sublist(1),
-          companionUrl: isLive ? liveUrl : null,
+          companionUrl: liveCandidates.isNotEmpty ? liveCandidates.first : null,
+          companionFallbackUrls: liveCandidates.length > 1
+              ? liveCandidates.sublist(1)
+              : const [],
           width: (img['width'] as num?)?.toInt(),
           height: (img['height'] as num?)?.toInt(),
         ));
@@ -244,55 +264,183 @@ class XiaohongshuParser extends MediaParser {
     );
   }
 
-  /// 小红书图片原图直取（2026-11-06 实测有效）。
+  /// 小红书实况视频地址（2026-11-11 重写）。
+  ///
+  /// 新版 H5 结构（实测 2026-11）：
+  /// ```jsonc
+  /// imageList[i] = {
+  ///   fileId: "notes_pre_post/1040g3k...",
+  ///   livePhoto: true,
+  ///   stream: { h264: [{ masterUrl, width, height, videoBitrate, backupUrls }] }
+  /// }
+  /// ```
+  /// 普通图 `stream` 是 `{}`，实况图才有 h264/h265 数组。
+  /// 旧版把视频放在 `livePhotoUrl` / `video.media.stream`，都要兼容。
+  static List<String> _liveVideoCandidates(Map<String, dynamic> img) {
+    final out = <String>[];
+    void add(String? u) {
+      if (u == null || u.isEmpty) return;
+      final h = _httpsify(u);
+      if (!out.contains(h)) out.add(h);
+    }
+
+    // 1) 文档里的旧字段
+    final lpu = img['livePhotoUrl'];
+    if (lpu is String) add(lpu);
+
+    // 2) 选出码率/分辨率最高的一档
+    Map<String, dynamic>? stream;
+    final st = img['stream'];
+    if (st is Map && st.isNotEmpty) stream = st.cast<String, dynamic>();
+    final v = img['video'];
+    if (v is Map) {
+      final media = v['media'];
+      if (stream == null && media is Map) {
+        final s2 = media['stream'];
+        if (s2 is Map && s2.isNotEmpty) stream = s2.cast<String, dynamic>();
+      }
+      // originVideoKey = 作者上传的原片（无水印），sns-video-hw 直取
+      final consumer = v['consumer'];
+      final okRaw = consumer is Map ? consumer['originVideoKey'] : null;
+      final ok = okRaw is String ? okRaw : null;
+      if (ok != null && ok.isNotEmpty) {
+        add('https://sns-video-hw.xhscdn.com/$ok');
+        add('https://sns-video-bd.xhscdn.com/$ok');
+      }
+    }
+
+    if (stream != null) {
+      String? best;
+      var bestScore = -1;
+      final backups = <String>[];
+      for (final key in ['h264', 'h265', 'av1', 'vkey']) {
+        final arr = stream[key];
+        if (arr is! List) continue;
+        for (final e in arr) {
+          if (e is! Map) continue;
+          final mm = e.cast<String, dynamic>();
+          final muRaw = mm['masterUrl'];
+          final mu = muRaw is String ? muRaw : null;
+          if (mu == null || mu.isEmpty) continue;
+          final px = (_intOf(mm['width']) ?? 0) * (_intOf(mm['height']) ?? 0);
+          final br = _intOf(mm['videoBitrate']) ??
+              _intOf(mm['avgBitrate']) ??
+              _intOf(mm['avg_bitrate']) ??
+              0;
+          final score = px * 1000 + br + (key == 'h264' ? 1 : 0);
+          if (score > bestScore) {
+            bestScore = score;
+            best = mu;
+          }
+          final rb = mm['backupUrls'];
+          if (rb is String && rb.isNotEmpty) {
+            for (final m in RegExp(r'https?://[^\s\],]+').allMatches(rb)) {
+              var u = m.group(0)!;
+              while (u.endsWith("'") || u.endsWith('"')) {
+                u = u.substring(0, u.length - 1);
+              }
+              if (u.isNotEmpty) backups.add(u);
+            }
+          }
+        }
+      }
+      if (best != null) {
+        add(best);
+        // 主域被 CDN 防链时换备份域（同路径）
+        add(best.replaceAll(RegExp(r'sns-video-[a-z0-9]+'), 'sns-bak-v1'));
+        for (final b in backups) {
+          add(b);
+        }
+      } else {
+        // 结构未知：递归捞出所有视频直链兜底（只在 stream 内找，不会混入图片）
+        _collectVideoUrls(stream, out);
+      }
+    }
+    return out;
+  }
+
+  /// 递归收集视频直链（结构未知时的兜底，深度受限）
+  static void _collectVideoUrls(Object? node, List<String> out, [int depth = 0]) {
+    if (node == null || depth > 5 || out.length > 12) return;
+    if (node is String) {
+      if (node.startsWith('http') &&
+          (node.contains('sns-video') || node.contains('.mp4'))) {
+        final h = _httpsify(node);
+        if (!out.contains(h)) out.add(h);
+      }
+      return;
+    }
+    if (node is Map) {
+      for (final v in node.values) {
+        _collectVideoUrls(v, out, depth + 1);
+      }
+    } else if (node is List) {
+      for (final v in node) {
+        _collectVideoUrls(v, out, depth + 1);
+      }
+    }
+  }
+
+  static String? _firstString(Map<String, dynamic> m, List<String> keys) {
+    for (final k in keys) {
+      final v = m[k];
+      if (v is String && v.isNotEmpty) return v;
+    }
+    return null;
+  }
+
+  /// 小红书图片原图直取（2026-11-06 实测有效，2026-11-11 改为 fileId 优先）。
   ///
   /// 关键发现：笔记页给的 urlDefault/url 都是 **H5 带水印版**
   /// （`sns-webpic-qc/…/{日期}/{hash}/notes_pre_post/{fileId}!h5_1080jpg`，
   ///  1080×1080、正中压制「小红书」水印）。
   /// 而同一 fileId 在图片 CDN 上还有 **原始上传文件**：
   ///   `https://sns-img-hw.xhscdn.com/notes_pre_post/{fileId}?imageView2/2/w/0/format/jpg`
-  ///   → 2160×2160、1.15MB、**完全无水印**（HEIC 版 1.85MB 亦无水印）
+  ///   → 2160×2160、1.8MB、**完全无水印**
   /// 因此不再依赖"删参数"这种碰运气做法，直接按 fileId 拼原图地址。
-  static List<String> _originalCandidates(String raw) {
-    final uri = Uri.tryParse(raw);
-    if (uri == null || uri.pathSegments.isEmpty) return [raw];
-
-    // 真实资源路径 = 去掉 CDN 的「日期/hash」前缀与 `!处理后缀`
-    const markers = ['notes_pre_post', 'notes_uhdr', 'spectrum', 'CRATER'];
-    final segs = uri.pathSegments.map((e) => e.split('!').first).toList();
-    final idx = segs.indexWhere((e) => markers.contains(e));
-    if (idx < 0) {
-      // 2026-11-09 新形态（移动分享页）：路径无 marker，末段即 fileId
-      // （如 1040g008327ami786n8c05nehs1808avfacnnfi8!h5_1080jpg）。
-      // fileId 直接拼 CDN 根路径 = 无水印原图（SSR 内嵌的 sns-na-i1 直链
-      // 同为 fileId 根路径可证；真机实测 200 / 1.5MB vs H5 版 344KB）。
-      // 旧逻辑此时只返回 raw（带水印 H5 图），导致保存环节触发涂抹修补糊脸。
-      final fid = uri.pathSegments.last.split('!').first;
-      if (fid.length >= 40) {
-        const jpg = '?imageView2/2/w/0/format/jpg';
-        return [
-          _httpsify('https://sns-img-hw.xhscdn.com/$fid$jpg'),
-          _httpsify('https://sns-img-bd.xhscdn.com/$fid$jpg'),
-          raw, // 兜底：带水印 H5 图
-        ];
-      }
-      return [raw]; // 未知形态：保持原样，交给下载器
-    }
-
-    final realPath = segs.sublist(idx).join('/');
-    const jpg = '?imageView2/2/w/0/format/jpg';   // w/0 = 原始宽度
+  ///
+  /// [fileId] 是 imageList[i].fileId（如 `notes_pre_post/1040g3k...`），
+  /// 新老页面都稳定存在，且就是 CDN 上的真实相对路径 —— 比从 H5 地址里
+  /// 反推可靠（H5 地址前缀带日期/hash 目录，形态还会改版）。
+  static List<String> _originalCandidates(String raw, {String? fileId}) {
+    const jpg = '?imageView2/2/w/0/format/jpg'; // w/0 = 原始宽度
     final out = <String>[];
     void add(String u) {
+      if (u.isEmpty) return;
       final h = _httpsify(u);
       if (!out.contains(h)) out.add(h);
     }
 
-    add('https://sns-img-hw.xhscdn.com/$realPath$jpg');
-    add('https://sns-img-bd.xhscdn.com/$realPath$jpg');
-    // 注意：不带 format=jpg 会返回 HEIC，而文件按 .jpg 命名会 UTI 不符
-    // （PhotoKit 可能拒收），因此只保留 JPEG 变体
-    add(raw);                                          // 最后才用带水印的 H5 版
-    return out;
+    // ① 首选：fileId 拼 CDN 根路径（无水印原图）
+    final fid = (fileId ?? '').trim();
+    if (fid.isNotEmpty && RegExp(r'[0-9a-z]{20,}').hasMatch(fid)) {
+      final p = fid.startsWith('/') ? fid.substring(1) : fid;
+      add('https://sns-img-hw.xhscdn.com/$p$jpg');
+      add('https://sns-img-bd.xhscdn.com/$p$jpg');
+    }
+
+    // ② fileId 缺失/不合法：从 H5 地址反推真实资源路径
+    final uri = Uri.tryParse(raw);
+    if (uri != null && uri.pathSegments.isNotEmpty) {
+      const markers = ['notes_pre_post', 'notes_uhdr', 'spectrum', 'CRATER'];
+      final segs = uri.pathSegments.map((e) => e.split('!').first).toList();
+      final idx = segs.indexWhere((e) => markers.contains(e));
+      if (idx >= 0) {
+        add('https://sns-img-hw.xhscdn.com/${segs.sublist(idx).join('/')}$jpg');
+        add('https://sns-img-bd.xhscdn.com/${segs.sublist(idx).join('/')}$jpg');
+      } else {
+        // 新形态（移动分享页）：路径无 marker，末段即 fileId
+        final last = uri.pathSegments.last.split('!').first;
+        if (last.length >= 40) {
+          add('https://sns-img-hw.xhscdn.com/$last$jpg');
+          add('https://sns-img-bd.xhscdn.com/$last$jpg');
+        }
+      }
+    }
+
+    // ③ 最后才用带水印的 H5 版（宁可给图，也不给"下载失败"）
+    add(raw);
+    return out.isEmpty ? [raw] : out;
   }
 
   String? _extractInitialState(String html) {

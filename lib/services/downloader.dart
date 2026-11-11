@@ -152,6 +152,13 @@ class Downloader {
         {}, // 极少数视频 CDN 带 Referer 反而 403，裸请求殿后
       ];
     }
+    // 小红书：sns-img / sns-video 部分线路校验 Referer；裸请求仍可用，殿后
+    if (host.contains('xhscdn') || host.contains('xiaohongshu')) {
+      return [
+        {'Referer': 'https://www.xiaohongshu.com/'},
+        {},
+      ];
+    }
     // X（推特）：twimg 带 x.com Referer；失败再裸请求
     if (host.contains('twimg.com')) {
       return [

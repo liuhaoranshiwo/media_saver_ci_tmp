@@ -55,7 +55,11 @@ class _ResultScreenState extends State<ResultScreen> {
       final liveUrl = item.companionUrl!;
       final liveExt = liveUrl.toLowerCase().contains('.mov') ? 'mov' : 'mp4';
       final videoFile = await Downloader.download(
-          ParsedMediaItem(kind: MediaKind.video, url: liveUrl, ext: liveExt),
+          ParsedMediaItem(
+              kind: MediaKind.video,
+              url: liveUrl,
+              ext: liveExt,
+              fallbackUrls: item.companionFallbackUrls),
           onProgress: (r, t) {
         if (!mounted) return;
         setState(() => _downloading[index] = t > 0 ? r / t : 0);
@@ -163,7 +167,10 @@ class _ResultScreenState extends State<ResultScreen> {
         final liveUrl = item.companionUrl!;
         final liveExt = liveUrl.toLowerCase().contains('.mov') ? 'mov' : 'mp4';
         final videoFile = await Downloader.download(ParsedMediaItem(
-            kind: MediaKind.video, url: liveUrl, ext: liveExt));
+            kind: MediaKind.video,
+            url: liveUrl,
+            ext: liveExt,
+            fallbackUrls: item.companionFallbackUrls));
 
         var savedImage = false;
         var savedVideo = false;

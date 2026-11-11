@@ -1134,32 +1134,57 @@ public class LivePhotoSaverPlugin: NSObject, FlutterPlugin {
     }
     refreshLum()
 
-    // 逐像素 9px 窗口中值背景
-    var bg = [UInt8](repeating: 0, count: lw * lh)
-    var win = [UInt8](repeating: 0, count: 81)
-    for y in 0..<lh {
-      for x in 0..<lw {
-        var n = 0
-        let y0 = max(0, y - 4), y1 = min(lh - 1, y + 4)
-        let x0 = max(0, x - 4), x1 = min(lw - 1, x + 4)
-        for yy in y0...y1 {
-          let row = yy * lw
+    // ---- 背景下包络：灰度开运算（erode→dilate）----
+    // 2026-11-11 v10（取代 9px 中值背景）：
+    //   旧版判据是「比局部中值亮 margin」，在白发/白裙/白墙这类高亮背景下
+    //   白字与背景亮度几乎一样 → 笔画判不出来 → 残留白色字块（用户反馈的
+    //   "涂抹悬浮的白色文字"）。改用顶帽（top-hat）：
+    //   开运算会抹掉所有「比结构元细」的亮结构，剩下的是背景下包络；
+    //   lum - opening = 细亮结构（笔画）的强度，与大块高光无关。
+    //   再除以 (255 - 背景) 得到该像素的"白字覆盖率 alpha"，
+    //   只处理 alpha 足够大（肉眼可见）的部分 —— 白字压白底本来就看不见，
+    //   留着也察觉不到，避免为了不可见的残影去大改画面。
+    func morph(_ src: [UInt8], _ r: Int, _ isMin: Bool) -> [UInt8] {
+      var tmp = [UInt8](repeating: 0, count: lw * lh)
+      var out = [UInt8](repeating: 0, count: lw * lh)
+      for y in 0..<lh {
+        let row = y * lw
+        for x in 0..<lw {
+          var v = src[row + x]
+          let x0 = max(0, x - r), x1 = min(lw - 1, x + r)
           for xx in x0...x1 {
-            win[n] = lum[row + xx]; n += 1
+            let s = src[row + xx]
+            if isMin { if s < v { v = s } } else { if s > v { v = s } }
           }
+          tmp[row + x] = v
         }
-        // 取中值（部分选择即可，规模 ≤81）
-        var tmp = Array(win[0..<n])
-        tmp.sort()
-        bg[y * lw + x] = tmp[n / 2]
       }
+      for x in 0..<lw {
+        for y in 0..<lh {
+          var v = tmp[y * lw + x]
+          let y0 = max(0, y - r), y1 = min(lh - 1, y + r)
+          for yy in y0...y1 {
+            let s = tmp[yy * lw + x]
+            if isMin { if s < v { v = s } } else { if s > v { v = s } }
+          }
+          out[y * lw + x] = v
+        }
+      }
+      return out
     }
 
+    // 结构元半径 ≈ 笔画宽度的一半（笔画约 2~4 个 lineH/10）
+    let kr = max(4, min(11, lineH / 6))
     var healedAny = false
 
     // 两遍：主阈值 → 残影弱阈值
     for pass in 0..<2 {
-      let margin = pass == 0 ? 12 : 8
+      // 开运算：腐蚀(取min) 再膨胀(取max) → 抹掉细亮结构
+      let ero = morph(lum, kr, true)
+      let opening = morph(ero, kr, false)
+      let tTop = pass == 0 ? 16 : 10        // 顶帽强度下限
+      let tAlpha = pass == 0 ? 0.15 : 0.09  // 白字覆盖率下限
+
       var cand = [Bool](repeating: false, count: lw * lh)
       for y in ey0...ey1 {
         for x in ex0...ex1 {
@@ -1167,9 +1192,11 @@ public class LivePhotoSaverPlugin: NSObject, FlutterPlugin {
           let o = gidx(x, y) * 4
           let rr = Int(buf[o]), gg = Int(buf[o + 1]), bb = Int(buf[o + 2])
           let mx = max(rr, max(gg, bb)), mn = min(rr, min(gg, bb))
-          if Int(lum[r]) > Int(bg[r]) + margin && (mx - mn) <= 80 {
-            cand[r] = true
-          }
+          if (mx - mn) > 80 { continue }   // 彩色高光不是白字
+          let top = Int(lum[r]) - Int(opening[r])
+          if top < tTop { continue }
+          let alpha = Double(top) / Double(max(1, 255 - Int(opening[r])))
+          if alpha >= tAlpha { cand[r] = true }
         }
       }
       // 4 邻接连通域 + 笔画形态过滤
@@ -1208,7 +1235,7 @@ public class LivePhotoSaverPlugin: NSObject, FlutterPlugin {
           }
         }
         let hgt = maxY - minY + 1
-        if pix.count >= 6 && pix.count <= maxArea && hgt <= lineH * 3 / 2 {
+        if pix.count >= 10 && pix.count <= maxArea && hgt <= lineH * 3 / 2 {
           for r in pix { mask[r] = true }
         }
       }
@@ -1233,7 +1260,7 @@ public class LivePhotoSaverPlugin: NSObject, FlutterPlugin {
       for v in dil where v { dcnt += 1 }
       if dcnt <= 110_000 {
         coherentPatchFillROI(&buf, w: w, h: h, ex0: ex0, ex1: ex1, ey0: ey0, ey1: ey1,
-                             mask: dil, rounds: 3, half: 3, search: 64)
+                             mask: dil, rounds: 4, half: 3, search: 96)
       } else {
         // 洋葱扩散（ROI 局部）：逐圈用非掩码邻域均值填充
         var remaining = dil
