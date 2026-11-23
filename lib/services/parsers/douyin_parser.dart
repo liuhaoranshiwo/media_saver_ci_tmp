@@ -22,6 +22,9 @@ class DouyinParser extends MediaParser {
   /// 作品类型路径：video=视频 note=图集 slides=2026-11 新版图集分享路径
   static final _idInUrl = RegExp(r'/(video|note|slides)/(\d+)');
 
+  /// 作者主页：/user/{sec_uid}（桌面）或 /share/user/{sec_uid}（移动分享页）
+  static final _userInUrl = RegExp(r'/user/([A-Za-z0-9_-]{10,})');
+
   static const _ttwidRegisterUrl =
       'https://ttwid.bytedance.com/ttwid/union/register/';
   /// 多组注册参数轮换（2026-11 实测 aid 1768/6383/2906 均可出 ticket），
@@ -43,6 +46,14 @@ class DouyinParser extends MediaParser {
         await HttpUtil.getWithRedirects(url, ua: HttpUtil.iosUa);
     final m = _idInUrl.firstMatch(finalUrl);
     if (m == null) {
+      // 非作品链接：优先识别作者主页（/user/{sec_uid} 或 sec_uid= 参数）。
+      // 注意作品分享 URL 的 query 里也常带 sec_uid，所以先查作品 ID、后查主页。
+      final userM = _userInUrl.firstMatch(finalUrl);
+      final secUid = userM?.group(1) ??
+          Uri.tryParse(finalUrl)?.queryParameters['sec_uid'];
+      if (secUid != null && secUid.length >= 10) {
+        return _parseUserProfile(secUid, url);
+      }
       throw ParseException('抖音链接中未找到作品 ID（$finalUrl）');
     }
     final kindPath = m.group(1)!;
@@ -131,6 +142,81 @@ class DouyinParser extends MediaParser {
     AppLogger.log('dy-parse', '两路均失败');
     AppLogger.report(failMsg);
     throw ParseException(failMsg);
+  }
+
+  // ---------- 作者主页：抓取全部作品（2026-11-12 新增） ----------
+
+  /// 主页链接（/user/{sec_uid}）→ 抓取作者全部作品。
+  ///
+  /// 匿名（未登录）：桌面页服务端只发首批 20 条，返回 notice 提示登录；
+  /// 登录态（WebView cookie 已有 sessionid）：翻页到 has_more=false 全量。
+  /// 每条 aweme item 结构与 detail 一致（实测探测确认），直接复用 _extractItems。
+  Future<ParseResult> _parseUserProfile(String secUid, String sourceUrl) async {
+    AppLogger.log('dy-user', '识别到作者主页链接，启动主页抓取');
+    final Map<String, dynamic>? cap;
+    try {
+      cap = await DouyinCapture.instance
+          .captureUserProfile(secUid, budget: const Duration(seconds: 100));
+    } catch (e) {
+      AppLogger.log('dy-user', '主页抓取异常: $e');
+      cap = null;
+    }
+    if (cap == null) {
+      final msg = '主页抓取失败：页面未返回作品数据（稍后重试或检查链接）';
+      AppLogger.log('dy-user', msg);
+      AppLogger.report(msg);
+      throw ParseException(msg);
+    }
+
+    final posts = (cap['__userPosts'] as List?)?.whereType<Map>().toList() ??
+        const <Map>[];
+    final hasMore = cap['__userMore'] == true;
+    final nickname = (cap['__userNickname'] as String?) ?? '';
+    final totalCount = (cap['__userCount'] as num?)?.toInt();
+
+    final items = <ParsedMediaItem>[];
+    var skipped = 0;
+    for (final p in posts) {
+      try {
+        final one = _extractItems((p as Map).cast<String, dynamic>());
+        if (one == null) {
+          skipped++;
+          continue;
+        }
+        items.addAll(one);
+      } catch (_) {
+        skipped++;
+      }
+    }
+    AppLogger.log('dy-user',
+        '主页转换完成: 作品 ${posts.length} 件 → 媒体 ${items.length} 项（跳过 $skipped）');
+
+    if (items.isEmpty) {
+      throw ParseException('主页作品全部无法解析（私密或审核中的作品不可下载）');
+    }
+
+    // 截断提示：匿名锁 20 条 / 超时中断时告知用户可登录抓全部
+    String? notice;
+    if (hasMore) {
+      final total = totalCount ?? 0;
+      final grabbed = posts.length;
+      notice = total > grabbed && total > 0
+          ? '已抓取最近 $grabbed 件作品（作者共发布 $total 件），'
+              '登录抖音后可抓取全部'
+          : '未抓取全部作品（登录墙截断），登录抖音后可抓取全部';
+    }
+
+    return ParseResult(
+      platform: ParsePlatform.douyin,
+      sourceUrl: sourceUrl,
+      title: nickname.isEmpty
+          ? '作者主页作品（${posts.length} 件）'
+          : '$nickname 的作品（${posts.length} 件）',
+      author: nickname,
+      items: items,
+      parsedAt: DateTime.now(),
+      notice: notice,
+    );
   }
 
   // ---------- 数据源 A：ttwid + 分享页 SSR（纯 HTTP 主路径） ----------
@@ -329,11 +415,9 @@ class DouyinParser extends MediaParser {
 
   // ---------- item → ParseResult（捕获/SSR 共用） ----------
 
-  ParseResult _buildResult(Map<String, dynamic> item, String sourceUrl) {
-    final desc = (item['desc'] as String?) ?? '抖音作品';
-    final author =
-        (((item['author'] ?? const {}) as Map)['nickname']) as String? ?? '';
-
+  /// 核心转换（安静版）：aweme item → 媒体项列表。
+  /// 不抛异常、不上报（作者主页批量解析逐条调用，私密/审核中的作品直接跳过）。
+  List<ParsedMediaItem>? _extractItems(Map<String, dynamic> item) {
     final items = <ParsedMediaItem>[];
 
     // 图集（含实况：live_photo 标志 + live_image 配对视频双重确认）
@@ -400,17 +484,6 @@ class DouyinParser extends MediaParser {
       }
     }
 
-    // 核心诊断：图集作品却一张实况都没识别出来 → 上报原始结构供后台分析
-    if (images != null && images.isNotEmpty && items.isNotEmpty) {
-      final hasLive = items.any((i) => i.kind == MediaKind.livePhoto);
-      if (!hasLive) {
-        AppLogger.log('dy-live',
-            '⚠️ 图集 ${images.length} 张全部识别为普通图片，无实况');
-        AppLogger.report(
-            '抖音图集未识别到实况: ${items.length}张图 aweme_type=${item['aweme_type']}');
-      }
-    }
-
     // 视频：遍历 bit_rate 清晰度档位选码率最高（feed 源含原画档），兜底 play_addr
     // gear_name 形如 lowest_540 / normal_720_0 / highest_1080 / highest_4k / adapt_*
     final video = item['video'] as Map<String, dynamic>?;
@@ -459,8 +532,32 @@ class DouyinParser extends MediaParser {
       }
     }
 
-    if (items.isEmpty) throw ParseException('未解析到可下载的图片或视频');
+    if (items.isEmpty) return null;
+    return items;
+  }
 
+  ParseResult _buildResult(Map<String, dynamic> item, String sourceUrl) {
+    final items = _extractItems(item);
+
+    // 核心诊断：图集作品却一张实况都没识别出来 → 上报原始结构供后台分析
+    final images = item['images'] as List?;
+    if (images != null && images.isNotEmpty && items != null) {
+      final hasLive = items.any((i) => i.kind == MediaKind.livePhoto);
+      if (!hasLive) {
+        AppLogger.log('dy-live',
+            '⚠️ 图集 ${images.length} 张全部识别为普通图片，无实况');
+        AppLogger.report(
+            '抖音图集未识别到实况: ${items.length}张图 aweme_type=${item['aweme_type']}');
+      }
+    }
+
+    if (items == null || items.isEmpty) {
+      throw ParseException('未解析到可下载的图片或视频');
+    }
+
+    final desc = (item['desc'] as String?) ?? '抖音作品';
+    final author =
+        (((item['author'] ?? const {}) as Map)['nickname']) as String? ?? '';
     return ParseResult(
       platform: ParsePlatform.douyin,
       sourceUrl: sourceUrl,
