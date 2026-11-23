@@ -157,8 +157,9 @@ class DouyinParser extends MediaParser {
     // （"Final variable 'cap' might already be assigned"，build 117 CI 实测）
     Map<String, dynamic>? cap;
     try {
-      cap = await DouyinCapture.instance
-          .captureUserProfile(secUid, budget: const Duration(seconds: 100));
+      // budget 用 captureUserProfile 默认 150s（build 118：128 件 ≈ 7 页，
+      // 登录态每页 2-4s + 空转容忍，100s 不够）
+      cap = await DouyinCapture.instance.captureUserProfile(secUid);
     } catch (e) {
       AppLogger.log('dy-user', '主页抓取异常: $e');
       cap = null;
@@ -197,15 +198,25 @@ class DouyinParser extends MediaParser {
       throw ParseException('主页作品全部无法解析（私密或审核中的作品不可下载）');
     }
 
-    // 截断提示：匿名锁 20 条 / 超时中断时告知用户可登录抓全部
+    // 截断提示：区分"未登录"（正常锁 20 条）与"登录了但翻页中断"（网络/风控），
+    // 两者的用户动作不同：前者扫码登录重抓，后者直接点重试
     String? notice;
+    final loggedIn = cap['__userLoggedIn'] == true;
     if (hasMore) {
       final total = totalCount ?? 0;
       final grabbed = posts.length;
-      notice = total > grabbed && total > 0
-          ? '已抓取最近 $grabbed 件作品（作者共发布 $total 件），'
-              '登录抖音后可抓取全部'
-          : '未抓取全部作品（登录墙截断），登录抖音后可抓取全部';
+      final withTotal = total > grabbed && total > 0;
+      if (!loggedIn) {
+        notice = withTotal
+            ? '当前未登录抖音，只能抓取最近 $grabbed 件（作者共发布 $total 件）。'
+                '点下方登录后自动抓取全部作品'
+            : '当前未登录抖音，仅抓取到 $grabbed 件。点下方登录后自动抓取全部作品';
+      } else {
+        notice = withTotal
+            ? '已抓取 $grabbed 件（作者共 $total 件），翻页提前结束'
+                '（网络或风控），可点下方重新抓取'
+            : '翻页提前结束（网络或风控），已抓 $grabbed 件，可点下方重新抓取';
+      }
     }
 
     return ParseResult(
