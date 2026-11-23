@@ -79,6 +79,20 @@ media_saver/
    掩码过大时退回洋葱扩散。第二遍用弱阈值复扫残影。
 4. 任一步不确定（无水印 / 白色内容过多 / GIF / 解码失败 / 修补后整体接近纯白）都原样保存，不做破坏。
 
+### 抖音：作者主页作品抓取（build 117，2026-11-12）
+
+识别 `/user/{sec_uid}` 主页链接（作品分享 URL query 里的 `sec_uid` 不算），
+复用离屏 WebView 走桌面 `www.douyin.com/user/{secUid}` 页：
+
+- **数据源**：页面自己发出的 `aweme/v1/web/aweme/post/` 响应（带 a_bogus 签名、
+  含完整 `bit_rate` 10 档 / `play_addr` / `music` / `images`，与 detail 结构一致），
+  hook 截获 + 按 `aweme_id` 去重累加；主动 fetch 免签翻页与程序化滚动双驱动。
+- **匿名（未登录）**：服务端只发首批 20 条，翻页被锁（探测实测）。结果页提示
+  "已抓取最近 20 件（作者共 N 件），登录抖音后可抓取全部"。
+- **登录态**：结果页入口 → 扫码登录页（桌面 UA，二维码自动弹出，每 2s 轮询
+  `sessionid` cookie，检测到自动返回）→ 按原链接重新抓取，翻页到 `has_more=false` 全量。
+- 每条作品复用单作品解析逻辑（`_extractItems`）：图集/实况/BGM 合成/多清晰度档位全部一致。
+
 ## 构建与巨魔（TrollStore）安装
 
 ### 方式一：GitHub Actions 云端构建（无 Mac 首选）
@@ -120,6 +134,7 @@ flutter build ipa --release --no-codesign   # 巨魔安装无需签名
 | 原图（原始分辨率） | ✅ 图集 | ✅ fileId 原图（无水印） | ✅ large 原图 + 原生去水印 | ✅ name=orig | ⚠️ 仅主图 |
 | 无水印原视频 | ✅ 原画 | ✅ originVideoKey / 最高档 | ✅ 1080p 优先 | ✅ 最高码率 mp4 | ❌ |
 | Live 实况图 | ✅ 图 + 配对视频（含 BGM 合成） | ✅ 图 + `stream` 视频轨 | ✅ type=livephoto + videoSrc | ✅ GIF 转真 Live | ❌ |
+| 作者主页全部作品 | ✅ 匿名 20 件 / 登录全量（扫码后自动重抓） | ❌ | ❌ | ❌ | ❌ |
 
 ## 已知限制
 
@@ -129,14 +144,27 @@ flutter build ipa --release --no-codesign   # 巨魔安装无需签名
   静态帧是无水印原图。
 - **抖音**：`slides` 分享路径需转 `www.douyin.com/note/{id}`；detail 接口必须带页面
   cookie（UIFID）才 200，捕获链路靠离屏 WebView 注入，冷启动首帧可能较慢。
+- **抖音作者主页**：匿名（未登录）服务端锁首批 20 条，全量需扫码登录；
+  抓取耗时随作品数线性增长（每件作品解析到媒体项，128 件约 40~90s）。
 - 平台接口会不定期变更，字段失效时参照 `docs/平台解析链路说明.md` 用 mitmproxy 抓包更新。
 
 ## 变更记录
 
-- **v1.2.0 (build 114)**
+- **v1.2.0 (build 117)**
+  - 新功能：**抖音作者主页全部作品抓取**。识别 `/user/{sec_uid}` 链接，
+    桌面主页 hook 截获 `aweme/post` 响应（签名请求、bit_rate/play_addr/music/images
+    完整，与 detail 结构一致），免签 fetch + 滚动双驱动翻页。
+    匿名锁 20 条（探测实测），结果页提示并内置扫码登录页（轮询 `sessionid`
+    自动返回）→ 登录后按原链接重抓全量到 `has_more=false`。
+  - 结果页重构：`CustomScrollView + SliverGrid` 惰性构建（主页结果可达数百项），
+    AppBar 增加"全选/清空"。
+- **v1.2.0 (build 116)**
   - 小红书：实况图改读 `imageList[i].stream`（新版 H5 已无 `livePhotoUrl` 字段，
-    旧逻辑永远判成普通图片 → "live 图提取不到"）；普通图统一用 `fileId` 拼无水印原图。
-  - 微博：去水印检测换为顶帽 + α 覆盖率（修高亮背景下白字残留），PatchMatch 参数增强。
+    旧逻辑永远判成普通图片 → "live 图提取不到"）；普通图统一用 `fileId` 拼无水印原图
+    （实测 4 条笔记候选 #0 全部 200，体积是 H5 版 3~5 倍）。
+  - 微博：去水印检测换为顶帽 + α 覆盖率（修高亮背景下白字残留）。
+    真图调参结论：α 阈值 **0.35**、结构元 **lineH/14** —— 0.15 会把格纹高光选进来，
+    `lineH/8` 结构元反而更差。回归样本见 `docs/samples/`。
   - 抖音：slides 作品（`aweme_type=68`）不再被识别成照片 —— 去视口过滤、detail 注入
     延长到 15s、新增分享页 detail 兜底。
 - **v1.2.0 (build 112)** 抖音"全解析错目标"：视口过滤推荐流 + detail 作品 ID 校验 + 严格配对。
