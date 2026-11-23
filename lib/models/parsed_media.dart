@@ -62,6 +62,10 @@ class ParseResult {
   final List<ParsedMediaItem> items;
   final DateTime parsedAt;
 
+  /// 附加提示（结果页顶部展示）：
+  /// 抖音作者主页匿名抓取时被登录墙截断 → "已抓取 N 件（共 M 件），登录后可抓全部"
+  final String? notice;
+
   const ParseResult({
     required this.platform,
     required this.sourceUrl,
@@ -70,6 +74,7 @@ class ParseResult {
     this.avatarUrl,
     required this.items,
     required this.parsedAt,
+    this.notice,
   });
 
   bool get hasLivePhoto => items.any((e) => e.isLivePhoto);
