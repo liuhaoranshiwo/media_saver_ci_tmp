@@ -153,7 +153,9 @@ class DouyinParser extends MediaParser {
   /// 每条 aweme item 结构与 detail 一致（实测探测确认），直接复用 _extractItems。
   Future<ParseResult> _parseUserProfile(String secUid, String sourceUrl) async {
     AppLogger.log('dy-user', '识别到作者主页链接，启动主页抓取');
-    final Map<String, dynamic>? cap;
+    // 注意：不能声明 final —— try/catch 两处赋值会触发 Dart 流分析报错
+    // （"Final variable 'cap' might already be assigned"，build 117 CI 实测）
+    Map<String, dynamic>? cap;
     try {
       cap = await DouyinCapture.instance
           .captureUserProfile(secUid, budget: const Duration(seconds: 100));
