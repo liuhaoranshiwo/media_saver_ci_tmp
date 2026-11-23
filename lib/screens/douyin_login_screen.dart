@@ -17,6 +17,24 @@ import '../theme/app_theme.dart';
 class DouyinLoginScreen extends StatefulWidget {
   const DouyinLoginScreen({super.key});
 
+  /// 检查 WebView 持久 cookie 里是否已有抖音登录态
+  /// （结果页重抓前的分流：已登录直接重抓，未登录先走扫码页）
+  static Future<bool> checkLoggedIn() async {
+    try {
+      final cookies = await CookieManager.instance()
+          .getCookies(url: WebUri('https://www.douyin.com'));
+      final hasSession = cookies.any((c) =>
+          c.name == 'sessionid' &&
+          (c.value?.isNotEmpty ?? false) &&
+          c.value != 'delete_me');
+      final hasGuard =
+          cookies.any((c) => c.name == 'sid_guard' && (c.value?.isNotEmpty ?? false));
+      return hasSession || hasGuard;
+    } catch (_) {
+      return false;
+    }
+  }
+
   @override
   State<DouyinLoginScreen> createState() => _DouyinLoginScreenState();
 }
@@ -58,24 +76,7 @@ class _DouyinLoginScreenState extends State<DouyinLoginScreen> {
     });
   }
 
-  Future<bool> _checkSession() async {
-    try {
-      // 6.0.0 钉版没有 loadAllCookies（6.1+ API），用 getCookies
-      final cookies = await CookieManager.instance()
-          .getCookies(url: WebUri('https://www.douyin.com'));
-      final hasSession = cookies.any((c) =>
-          c.name == 'sessionid' &&
-          (c.value?.isNotEmpty ?? false) &&
-          c.value != 'delete_me');
-      // sid_guard 也在登录成功后出现，双确认降低误判
-      final hasGuard = cookies.any((c) =>
-          c.name == 'sid_guard' && (c.value?.isNotEmpty ?? false));
-      return hasSession || hasGuard;
-    } catch (e) {
-      AppLogger.log('dy-login', 'cookie 轮询异常: $e');
-      return false;
-    }
-  }
+  Future<bool> _checkSession() => DouyinLoginScreen.checkLoggedIn();
 
   Future<void> _onManualDone() async {
     final ok = await _checkSession();
