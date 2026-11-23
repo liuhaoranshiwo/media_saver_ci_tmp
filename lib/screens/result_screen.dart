@@ -6,10 +6,15 @@ import '../models/parsed_media.dart';
 import '../services/ai_inpaint_service.dart';
 import '../services/ai_settings.dart';
 import '../services/downloader.dart';
+import '../services/parser_service.dart';
 import '../services/saver_channel.dart';
 import '../theme/app_theme.dart';
+import 'douyin_login_screen.dart';
 
 /// 解析结果页：媒体网格 + 点按预览 + 长按多选 + 保存
+///
+/// 2026-11-12：抖音作者主页结果可达数百项媒体，网格改用 CustomScrollView +
+/// SliverGrid 惰性构建；AppBar 提供"全选/清空"；notice（登录后抓全部）入口。
 class ResultScreen extends StatefulWidget {
   final ParseResult result;
   const ResultScreen({super.key, required this.result});
@@ -21,6 +26,7 @@ class ResultScreen extends StatefulWidget {
 class _ResultScreenState extends State<ResultScreen> {
   final _downloading = <int, double>{};
   final _selected = <int>{};
+  bool _refetching = false;
 
   Future<void> _saveItems(List<int> indices) async {
     for (final i in indices) {
@@ -243,6 +249,41 @@ class _ResultScreenState extends State<ResultScreen> {
     });
   }
 
+  /// 全选/清空（作者主页作品多，逐个长按不现实）
+  void _toggleSelectAll() {
+    final n = widget.result.items.length;
+    setState(() {
+      if (_selected.length == n && n > 0) {
+        _selected.clear();
+      } else {
+        _selected
+          ..clear()
+          ..addAll(List<int>.generate(n, (i) => i));
+      }
+    });
+  }
+
+  /// 抖音主页结果被登录墙截断 → 扫码登录后按原链接重新抓取全部
+  Future<void> _refetchAll() async {
+    if (_refetching) return;
+    final ok = await Navigator.of(context).push<bool>(
+        MaterialPageRoute(builder: (_) => const DouyinLoginScreen()));
+    if (ok != true || !mounted) return;
+    setState(() => _refetching = true);
+    try {
+      final r = await ParserService.parse(widget.result.sourceUrl);
+      if (!mounted) return;
+      Navigator.of(context).pushReplacement(MaterialPageRoute(
+          builder: (_) => ResultScreen(result: r)));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _refetching = false);
+      _showStatus(
+          '重新抓取失败：${e.toString().replaceFirst('Exception: ', '')}',
+          error: true);
+    }
+  }
+
   void _openPreview(int index) {
     final item = widget.result.items[index];
     if (item.isVideo) {
@@ -268,58 +309,126 @@ class _ResultScreenState extends State<ResultScreen> {
     final r = widget.result;
     final allIndices = List<int>.generate(r.items.length, (i) => i);
     final targets = _selected.isEmpty ? allIndices : _selected.toList();
+    final allSelected =
+        _selected.length == r.items.length && r.items.isNotEmpty;
+    final videoCount = r.items.where((e) => e.isVideo).length;
+    final liveCount = r.items.where((e) => e.isLivePhoto).length;
 
     return Scaffold(
-      appBar: AppBar(title: Text(_platformName(r.platform))),
+      appBar: AppBar(
+        title: Text(_refetching ? '重新抓取中…' : _platformName(r.platform)),
+        actions: [
+          if (_refetching)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 14),
+              child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child:
+                      CircularProgressIndicator(strokeWidth: 2.2)),
+            )
+          else
+            TextButton(
+              onPressed: _toggleSelectAll,
+              child: Text(allSelected ? '清空' : '全选',
+                  style: const TextStyle(color: AppColors.primary)),
+            ),
+        ],
+      ),
       body: Column(
         children: [
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.all(AppSpacing.l),
-              children: [
-                Text(r.title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: AppText.subtitle),
-                const SizedBox(height: AppSpacing.xs),
-                Text(r.author.isEmpty ? '未知作者' : '@${r.author}',
-                    style: AppText.secondary),
-                const SizedBox(height: AppSpacing.s),
-                Text('点按预览 · 长按选择/取消', style: AppText.caption),
-                const SizedBox(height: AppSpacing.m),
-                GridView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  gridDelegate:
-                      const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 3,
-                    mainAxisSpacing: AppSpacing.s,
-                    crossAxisSpacing: AppSpacing.s,
+          // 抖音主页匿名截断提示（登录后可抓全部）
+          if (r.notice != null && !_refetching)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.fromLTRB(AppSpacing.l,
+                  AppSpacing.s, AppSpacing.l, 0),
+              padding: const EdgeInsets.all(AppSpacing.m),
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(AppRadius.chip),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(r.notice!, style: AppText.caption),
+                  const SizedBox(height: AppSpacing.xs),
+                  GestureDetector(
+                    onTap: _refetching ? null : _refetchAll,
+                    child: const Text('→ 登录抖音后抓取全部作品',
+                        style: TextStyle(
+                            color: AppColors.primary,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 13)),
                   ),
-                  itemCount: r.items.length,
-                  itemBuilder: (_, i) => _MediaCell(
-                    item: r.items[i],
-                    progress: _downloading[i],
-                    selected: _selected.contains(i),
-                    onTap: _downloading.containsKey(i)
-                        ? null
-                        : () => _openPreview(i),
-                    onLongPress: () => _toggleSelect(i),
+                ],
+              ),
+            ),
+          Expanded(
+            child: CustomScrollView(
+              slivers: [
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(AppSpacing.l,
+                      AppSpacing.m, AppSpacing.l, AppSpacing.s),
+                  sliver: SliverToBoxAdapter(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(r.title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppText.subtitle),
+                        const SizedBox(height: AppSpacing.xs),
+                        Text(r.author.isEmpty ? '未知作者' : '@${r.author}',
+                            style: AppText.secondary),
+                        const SizedBox(height: AppSpacing.s),
+                        Text('点按预览 · 长按选择/取消', style: AppText.caption),
+                      ],
+                    ),
                   ),
                 ),
-                const SizedBox(height: AppSpacing.m),
-                Container(
-                  padding: const EdgeInsets.all(AppSpacing.m),
-                  decoration: BoxDecoration(
-                    color: AppColors.surface,
-                    borderRadius: BorderRadius.circular(AppRadius.chip),
+                SliverPadding(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.l),
+                  sliver: SliverGrid(
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      mainAxisSpacing: AppSpacing.s,
+                      crossAxisSpacing: AppSpacing.s,
+                    ),
+                    delegate: SliverChildBuilderDelegate(
+                      (context, i) => _MediaCell(
+                        item: r.items[i],
+                        progress: _downloading[i],
+                        selected: _selected.contains(i),
+                        onTap: _downloading.containsKey(i)
+                            ? null
+                            : () => _openPreview(i),
+                        onLongPress: () => _toggleSelect(i),
+                      ),
+                      childCount: r.items.length,
+                    ),
                   ),
-                  child: Text(
-                    '共 ${r.items.length} 项：图片 ${r.imageCount} · '
-                    '视频 ${r.items.where((e) => e.isVideo).length} · '
-                    'Live ${r.items.where((e) => e.isLivePhoto).length}\n'
-                    '所有文件均为原始分辨率/原始码率，仅供个人使用。',
-                    style: AppText.caption),
+                ),
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(AppSpacing.l,
+                      AppSpacing.m, AppSpacing.l, AppSpacing.m),
+                  sliver: SliverToBoxAdapter(
+                    child: Container(
+                      padding: const EdgeInsets.all(AppSpacing.m),
+                      decoration: BoxDecoration(
+                        color: AppColors.surface,
+                        borderRadius:
+                            BorderRadius.circular(AppRadius.chip),
+                      ),
+                      child: Text(
+                        '共 ${r.items.length} 项：图片 ${r.imageCount} · '
+                        '视频 $videoCount · Live $liveCount\n'
+                        '所有文件均为原始分辨率/原始码率，仅供个人使用。',
+                        style: AppText.caption),
+                    ),
+                  ),
                 ),
               ],
             ),
