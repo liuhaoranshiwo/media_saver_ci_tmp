@@ -263,12 +263,16 @@ class _ResultScreenState extends State<ResultScreen> {
     });
   }
 
-  /// 抖音主页结果被登录墙截断 → 扫码登录后按原链接重新抓取全部
+  /// 抖音主页结果不完整 → 已登录直接重抓；未登录先扫码登录再重抓
   Future<void> _refetchAll() async {
     if (_refetching) return;
-    final ok = await Navigator.of(context).push<bool>(
-        MaterialPageRoute(builder: (_) => const DouyinLoginScreen()));
-    if (ok != true || !mounted) return;
+    final hasSession = await DouyinLoginScreen.checkLoggedIn();
+    if (!hasSession) {
+      final ok = await Navigator.of(context).push<bool>(
+          MaterialPageRoute(builder: (_) => const DouyinLoginScreen()));
+      if (ok != true || !mounted) return;
+    }
+    if (!mounted) return;
     setState(() => _refetching = true);
     try {
       final r = await ParserService.parse(widget.result.sourceUrl);
@@ -337,7 +341,7 @@ class _ResultScreenState extends State<ResultScreen> {
       ),
       body: Column(
         children: [
-          // 抖音主页匿名截断提示（登录后可抓全部）
+          // 抖音主页截断提示（未登录→登录抓全部；已登录→直接重抓）
           if (r.notice != null && !_refetching)
             Container(
               width: double.infinity,
@@ -355,8 +359,11 @@ class _ResultScreenState extends State<ResultScreen> {
                   const SizedBox(height: AppSpacing.xs),
                   GestureDetector(
                     onTap: _refetching ? null : _refetchAll,
-                    child: const Text('→ 登录抖音后抓取全部作品',
-                        style: TextStyle(
+                    child: Text(
+                        (r.notice ?? '').contains('未登录')
+                            ? '→ 登录抖音后抓取全部作品'
+                            : '→ 重新抓取全部作品',
+                        style: const TextStyle(
                             color: AppColors.primary,
                             fontWeight: FontWeight.w600,
                             fontSize: 13)),
