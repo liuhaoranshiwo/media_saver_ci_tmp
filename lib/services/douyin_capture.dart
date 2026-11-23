@@ -54,6 +54,108 @@ try {
 })();
 ''';
 
+/// 抖音作者主页抓取（2026-11-12 新增）：
+///   桌面 /user/{secUid} 页自己发的 aweme/post 请求带 a_bogus 签名且响应完整
+///   （bit_rate 10 档 + play_addr 3 url + music + images，实测探测确认），
+///   匿名首批 20 条；移动 v2 API 翻页被锁且无 play_addr，不可用。
+///   抓取策略 = hook 截获页面 post 响应 + 主动 fetch 翻页（免签尝试，detail
+///   接口实测免签，post 可能同样免签）+ 程序化滚动驱动（页面自己发签名请求）
+///   + 匿名登录墙移除（.douyin_login_new_class 的 fixed 祖先 remove）。
+///   匿名被服务端锁 20 条时返回 hasMore=true，由上层提示"登录后可抓全部"。
+const _profileHookJs = '''
+(function(){
+  if (window.__profInstalled) return; window.__profInstalled = true;
+  function post(name, val){ try{ window.flutter_inappwebview.callHandler(name, val); }catch(e){} }
+  function isPostText(t){ return typeof t === 'string' && t.indexOf('aweme_list') >= 0; }
+  var of = window.fetch;
+  if (of) {
+    window.fetch = function(){
+      var p = of.apply(this, arguments);
+      try {
+        p.then(function(res){ res.clone().text().then(function(t){ if (isPostText(t)) post('capPosts', t); }); });
+      } catch(e){}
+      return p;
+    };
+  }
+  var ox = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(m, u){ this.__profUrl = u; return ox.apply(this, arguments); };
+  var os = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function(){
+    var xhr = this;
+    xhr.addEventListener('load', function(){
+      try { if (isPostText(xhr.responseText)) post('capPosts', xhr.responseText); } catch(e){}
+    });
+    return os.apply(this, arguments);
+  };
+  // 主页 SSR 的 _ROUTER_DATA 含 userInfo（nickname/aweme_count），轮询上报
+  var n = 0;
+  var t1 = setInterval(function(){
+    n++;
+    try {
+      if (window._ROUTER_DATA) {
+        var ld = window._ROUTER_DATA.loaderData || {};
+        for (var k in ld) {
+          var p = ld[k];
+          if (p && p.userInfo && p.userInfo.user) {
+            post('capPosts', JSON.stringify({__userInfo: p.userInfo}));
+            clearInterval(t1);
+            return;
+          }
+        }
+      }
+    } catch(e){}
+    if (n > 40) clearInterval(t1);
+  }, 300);
+})();
+''';
+
+/// 主动 fetch post 接口翻页（页面上下文，带页面 cookie；
+/// 与 detail 同思路 —— 可能免签，失败则由滚动驱动兜底）
+String _pullPostsJs(String secUid, int maxCursor) => '''
+(function(){
+try {
+  var u = 'https://www.douyin.com/aweme/v1/web/aweme/post/?device_platform=webapp&aid=6383'
+    + '&channel=channel_pc_web&sec_user_id=' + encodeURIComponent('$secUid')
+    + '&max_cursor=$maxCursor&count=20'
+    + '&pc_client_type=1&version_code=170400&version_name=17.4.0'
+    + '&cookie_enabled=true&platform=PC&downlink=10';
+  fetch(u, {credentials:'include'})
+    .then(function(r){ return r.text(); })
+    .then(function(t){
+      if (t && t.indexOf('aweme_list') >= 0 && !window.__profPulled$maxCursor) {
+        window.__profPulled$maxCursor = true;
+        window.flutter_inappwebview.callHandler('capPosts', t);
+      }
+    })
+    .catch(function(){});
+} catch(e){}
+})();
+''';
+
+/// 程序化滚动 + 匿名登录墙移除（window 与内部滚动容器双管齐下）
+const _scrollProfileJs = '''
+(function(){
+  try {
+    var n = document.querySelector('.douyin_login_new_class');
+    if (n) {
+      var a = n;
+      while (a && a !== document.body) {
+        var st = getComputedStyle(a);
+        if (st.position === 'fixed') { a.remove(); break; }
+        a = a.parentElement;
+      }
+    }
+    window.scrollBy(0, 1200);
+    var boxes = document.querySelectorAll('[tabindex="-1"]');
+    for (var i = 0; i < boxes.length; i++) {
+      var b = boxes[i];
+      if (b.scrollHeight > b.clientHeight + 100) b.scrollBy(0, 1200);
+    }
+  } catch(e){}
+  return 1;
+})();
+''';
+
 /// 采集当前 DOM 全部 douyinvod 视频直链 + BGM 音乐 + 当前页 URL
 /// （翻页扫描用；url 用于检测误跳到"下一个推荐作品"）
 /// ⚠️ 2026-11-11 实测：slides 图集在桌面页的视频 src 是
@@ -128,6 +230,14 @@ class DouyinCapture {
   /// 响应也含特征字，抢跑会解析成别的作品（2026-11-11 真机"全解析错目标"）
   String _expectedId = '';
 
+  // ---------- 作者主页抓取状态（capPosts 通道） ----------
+  /// aweme_id → item（跨翻页去重累加）
+  final Map<String, Map<String, dynamic>> _postItems = {};
+  bool _postHasMore = true;
+  int _postCursor = 0;
+  Map<String, dynamic>? _profileInfo;
+  Completer<bool>? _newPostsSignal;
+
   void attach(InAppWebViewController controller) {
     _controller = controller;
     controller.addJavaScriptHandler(
@@ -189,6 +299,53 @@ class DouyinCapture {
               }
             } catch (_) {}
           }
+          return null;
+        });
+    // 作者主页：aweme/post 响应（aweme_list+has_more）与 SSR userInfo
+    controller.addJavaScriptHandler(
+        handlerName: 'capPosts',
+        callback: (args) {
+          if (args.isEmpty || args.first is! String) return null;
+          try {
+            final d = jsonDecode(args.first as String);
+            if (d is! Map) return null;
+            // SSR userInfo（{__userInfo: {...}} 包装）
+            final ui = d['__userInfo'];
+            if (ui is Map) {
+              final user = ui['user'];
+              _profileInfo = (user is Map)
+                  ? (user as Map).cast<String, dynamic>()
+                  : (ui as Map).cast<String, dynamic>();
+              AppLogger.log('dy-user',
+                  'userInfo: ${_profileInfo?['nickname']} aweme_count=${_profileInfo?['aweme_count']}');
+              return null;
+            }
+            final list = d['aweme_list'];
+            if (list is List) {
+              var added = 0;
+              for (final it in list) {
+                if (it is Map && it['aweme_id'] != null) {
+                  final id = '${it['aweme_id']}';
+                  if (!_postItems.containsKey(id)) {
+                    _postItems[id] = (it as Map).cast<String, dynamic>();
+                    added++;
+                  }
+                }
+              }
+              final hm = d['has_more'];
+              if (hm is bool) _postHasMore = hm;
+              if (hm is num) _postHasMore = hm != 0;
+              final mc = d['max_cursor'];
+              if (mc is num) _postCursor = mc.toInt();
+              AppLogger.log('dy-user',
+                  'post 响应: +$added (总${_postItems.length}) has_more=$_postHasMore cursor=$_postCursor');
+              if (added > 0 &&
+                  _newPostsSignal != null &&
+                  !_newPostsSignal!.isCompleted) {
+                _newPostsSignal!.complete(true);
+              }
+            }
+          } catch (_) {}
           return null;
         });
   }
@@ -426,6 +583,105 @@ class DouyinCapture {
     return detailItem; // detail 有图集但无实况、DOM 也无 video → 交 parser 保留原结果
   }
 
+  /// 抓取作者主页全部作品（2026-11-12 新增）。
+  ///
+  /// 数据路（探测实测结论）：
+  ///   桌面 www.douyin.com/user/{secUid} 页自己发的 aweme/post 请求带签名、
+  ///   响应含完整 bit_rate/play_addr/music/images —— hook 截获即可；
+  ///   主动 fetch 免签翻页（detail 同思路）为增强路，失败由滚动驱动兜底。
+  ///   匿名被服务端锁首批 20 条（滚动也不发新页）→ 返回 hasMore=true，
+  ///   登录态（WebView cookie 带 sessionid）滚动/翻页可拿全部。
+  ///
+  /// 返回 {'__userPosts': [item...], '__userMore': bool,
+  ///        '__userNickname'?: String, '__userCount'?: int}；无可抓数据返回 null。
+  Future<Map<String, dynamic>?> captureUserProfile(String secUid,
+      {Duration budget = const Duration(seconds: 100),
+      int maxItems = 600}) async {
+    final controller = _controller;
+    if (controller == null) return null;
+    _runId++;
+    _expectedId = ''; // 主页模式：不按作品 ID 过滤响应
+    _postItems.clear();
+    _postHasMore = true;
+    _postCursor = 0;
+    _profileInfo = null;
+    _newPostsSignal = Completer<bool>();
+
+    AppLogger.log('dy-user', '主页抓取启动: sec_uid=$secUid');
+    try {
+      await controller.setSettings(
+          settings: InAppWebViewSettings(
+        javaScriptEnabled: true,
+        transparentBackground: true,
+        userAgent: _desktopUa,
+        cacheEnabled: true,
+      ));
+    } catch (e) {
+      AppLogger.log('dy-user', '切桌面 UA 失败: $e');
+    }
+    try {
+      await controller.loadUrl(
+          urlRequest:
+              URLRequest(url: WebUri('https://www.douyin.com/user/$secUid')));
+    } catch (_) {/* 加载失败走超时 */}
+
+    final sw = Stopwatch()..start();
+    var idleRounds = 0;
+    // 首批由页面加载时自动发出（约 1-3s）；循环做"主动 fetch + 滚动"驱动后续页
+    while (sw.elapsed < budget &&
+        _postItems.length < maxItems &&
+        _postHasMore &&
+        idleRounds < 4) {
+      _newPostsSignal = Completer<bool>();
+      final before = _postItems.length;
+      try {
+        await controller.evaluateJavascript(
+            source: _pullPostsJs(secUid, _postCursor));
+        await controller.evaluateJavascript(source: _scrollProfileJs);
+      } catch (_) {}
+      var got = false;
+      try {
+        got = await _newPostsSignal!.future
+            .timeout(const Duration(seconds: 6), onTimeout: () => false);
+      } catch (_) {}
+      if (_postItems.length > before) {
+        idleRounds = 0;
+      } else {
+        idleRounds++;
+        if (!got && idleRounds <= 1) {
+          AppLogger.log('dy-user',
+              '第 $idleRounds 轮无新增（has_more=$_postHasMore 已抓${_postItems.length}）');
+        }
+      }
+    }
+
+    // 用完立刻恢复基线 iPhone UA（不影响 iesdouyin 主路）
+    try {
+      await controller.setSettings(
+          settings: InAppWebViewSettings(
+        javaScriptEnabled: true,
+        transparentBackground: true,
+        userAgent: _iosUa,
+        cacheEnabled: true,
+      ));
+    } catch (_) {}
+
+    if (_postItems.isEmpty) {
+      AppLogger.log('dy-user', '主页抓取结束：未抓到任何作品');
+      return null;
+    }
+    AppLogger.log('dy-user',
+        '主页抓取结束: ${_postItems.length} 件 has_more=$_postHasMore 耗时=${sw.elapsedMilliseconds}ms');
+    return {
+      '__userPosts': _postItems.values.toList(),
+      '__userMore': _postHasMore && _postItems.length < maxItems,
+      if (_profileInfo?['nickname'] is String)
+        '__userNickname': _profileInfo!['nickname'] as String,
+      if (_profileInfo?['aweme_count'] is num)
+        '__userCount': (_profileInfo!['aweme_count'] as num).toInt(),
+    };
+  }
+
   /// 只认 douyinvod 视频直链；BGM 音乐（.mp3/ies-music/douyinstatic）一律滤除
   static List<String> _filterRealVideos(Iterable<String> urls) => urls
       .where((u) =>
@@ -435,7 +691,6 @@ class DouyinCapture {
           !u.contains('douyinstatic') &&
           !u.contains('ies-music'))
       .toList();
-
   /// 解析 _collectVideosJs 返回（可能被外层引号包裹）→ (视频列表, BGM, URL)
   static (List<String>, String?, String) _parseCollect(dynamic raw) {
     try {
@@ -643,6 +898,10 @@ class DouyinCaptureView extends StatelessWidget {
         initialUserScripts: UnmodifiableListView<UserScript>([
           UserScript(
               source: _hookJs,
+              injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START),
+          // 作者主页抓取 hook（aweme_list 响应 + SSR userInfo 上报）
+          UserScript(
+              source: _profileHookJs,
               injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START),
         ]),
         onWebViewCreated: (c) => DouyinCapture.instance.attach(c),
