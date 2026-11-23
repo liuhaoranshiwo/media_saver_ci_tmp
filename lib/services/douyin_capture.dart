@@ -132,7 +132,13 @@ try {
 })();
 ''';
 
-/// 程序化滚动 + 匿名登录墙移除（window 与内部滚动容器双管齐下）
+/// 程序化滚动驱动 v2（build 118，修"抓不全"）：
+///   build 117 只用 scrollBy —— 它改 scrollTop 但【不派发 wheel 事件】，
+///   而探测时翻页请求是 playwright mouse.wheel（真实输入事件）触发的，
+///   页面懒加载很可能监听 wheel。v2 三管齐下：
+///   ① 派发 WheelEvent（window + body）② window scrollBy + 全部可滚动容器
+///   滚到底再回弹（触发 IntersectionObserver）③ 点"加载更多"按钮。
+///   另保留匿名登录墙移除。
 const _scrollProfileJs = '''
 (function(){
   try {
@@ -145,12 +151,29 @@ const _scrollProfileJs = '''
         a = a.parentElement;
       }
     }
-    window.scrollBy(0, 1200);
-    var boxes = document.querySelectorAll('[tabindex="-1"]');
-    for (var i = 0; i < boxes.length; i++) {
-      var b = boxes[i];
-      if (b.scrollHeight > b.clientHeight + 100) b.scrollBy(0, 1200);
+    function fireWheel(el) {
+      try {
+        el.dispatchEvent(new WheelEvent('wheel',
+            {deltaY: 2400, bubbles: true, cancelable: true, view: window}));
+      } catch(e){}
     }
+    fireWheel(window);
+    if (document.body) fireWheel(document.body);
+    try { window.scrollBy(0, 3000); } catch(e){}
+    var els = document.querySelectorAll('div,section,main');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      try {
+        if (el.scrollHeight > el.clientHeight + 200 && el.clientHeight > 200) {
+          el.scrollTop = el.scrollHeight;
+          (function(e2){
+            setTimeout(function(){ e2.scrollTop = e2.scrollHeight - 600; }, 80);
+          })(el);
+        }
+      } catch(e){}
+    }
+    var btns = document.querySelectorAll('[class*="load-more"],[class*="loadMore"]');
+    for (var i = 0; i < btns.length; i++) { try { btns[i].click(); } catch(e){} }
   } catch(e){}
   return 1;
 })();
@@ -583,7 +606,7 @@ class DouyinCapture {
     return detailItem; // detail 有图集但无实况、DOM 也无 video → 交 parser 保留原结果
   }
 
-  /// 抓取作者主页全部作品（2026-11-12 新增）。
+  /// 抓取作者主页全部作品（2026-11-12 新增，build 118 调优）。
   ///
   /// 数据路（探测实测结论）：
   ///   桌面 www.douyin.com/user/{secUid} 页自己发的 aweme/post 请求带签名、
@@ -592,10 +615,16 @@ class DouyinCapture {
   ///   匿名被服务端锁首批 20 条（滚动也不发新页）→ 返回 hasMore=true，
   ///   登录态（WebView cookie 带 sessionid）滚动/翻页可拿全部。
   ///
+  /// build 118 调优（用户反馈"抓不全"）：
+  ///   - 抓取前读 cookie 记录登录态（区分"没登录"与"登录但翻页失效"）
+  ///   - 滚动驱动加 WheelEvent 派发（scrollBy 不触发 wheel —— 探测的翻页
+  ///     请求是 playwright mouse.wheel 触发的）+ 可滚动容器滚到底回弹
+  ///   - 每轮等待 6s→8s、容忍空转 4→6 轮、预算 100s→150s（128 件 ≈ 7 页）
+  ///
   /// 返回 {'__userPosts': [item...], '__userMore': bool,
   ///        '__userNickname'?: String, '__userCount'?: int}；无可抓数据返回 null。
   Future<Map<String, dynamic>?> captureUserProfile(String secUid,
-      {Duration budget = const Duration(seconds: 100),
+      {Duration budget = const Duration(seconds: 150),
       int maxItems = 600}) async {
     final controller = _controller;
     if (controller == null) return null;
@@ -607,7 +636,19 @@ class DouyinCapture {
     _profileInfo = null;
     _newPostsSignal = Completer<bool>();
 
-    AppLogger.log('dy-user', '主页抓取启动: sec_uid=$secUid');
+    // 登录态诊断（关键：区分"没登录"与"登录但翻页失效"）
+    var loggedIn = false;
+    try {
+      final cookies = await CookieManager.instance()
+          .getCookies(url: WebUri('https://www.douyin.com'));
+      loggedIn = cookies.any((c) =>
+          c.name == 'sessionid' &&
+          (c.value?.isNotEmpty ?? false) &&
+          c.value != 'delete_me');
+    } catch (_) {}
+    AppLogger.log('dy-user',
+        '主页抓取启动: sec_uid=${secUid.length}字符 登录态=${loggedIn ? "已登录" : "匿名"}');
+
     try {
       await controller.setSettings(
           settings: InAppWebViewSettings(
@@ -631,27 +672,28 @@ class DouyinCapture {
     while (sw.elapsed < budget &&
         _postItems.length < maxItems &&
         _postHasMore &&
-        idleRounds < 4) {
+        idleRounds < 6) {
       _newPostsSignal = Completer<bool>();
       final before = _postItems.length;
       try {
         await controller.evaluateJavascript(
             source: _pullPostsJs(secUid, _postCursor));
         await controller.evaluateJavascript(source: _scrollProfileJs);
+        // 一轮内二次滚动：页面往往需要连续滚动才触发下一页加载
+        await Future.delayed(const Duration(milliseconds: 1500));
+        await controller.evaluateJavascript(source: _scrollProfileJs);
       } catch (_) {}
       var got = false;
       try {
         got = await _newPostsSignal!.future
-            .timeout(const Duration(seconds: 6), onTimeout: () => false);
+            .timeout(const Duration(seconds: 8), onTimeout: () => false);
       } catch (_) {}
       if (_postItems.length > before) {
         idleRounds = 0;
       } else {
         idleRounds++;
-        if (!got && idleRounds <= 1) {
-          AppLogger.log('dy-user',
-              '第 $idleRounds 轮无新增（has_more=$_postHasMore 已抓${_postItems.length}）');
-        }
+        AppLogger.log('dy-user',
+            '第 $idleRounds 轮无新增（has_more=$_postHasMore cursor=$_postCursor 已抓${_postItems.length}）');
       }
     }
 
@@ -675,6 +717,7 @@ class DouyinCapture {
     return {
       '__userPosts': _postItems.values.toList(),
       '__userMore': _postHasMore && _postItems.length < maxItems,
+      '__userLoggedIn': loggedIn,
       if (_profileInfo?['nickname'] is String)
         '__userNickname': _profileInfo!['nickname'] as String,
       if (_profileInfo?['aweme_count'] is num)
