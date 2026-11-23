@@ -60,8 +60,9 @@ class _DouyinLoginScreenState extends State<DouyinLoginScreen> {
 
   Future<bool> _checkSession() async {
     try {
+      // 6.0.0 钉版没有 loadAllCookies（6.1+ API），用 getCookies
       final cookies = await CookieManager.instance()
-          .loadAllCookies(url: WebUri('https://www.douyin.com'));
+          .getCookies(url: WebUri('https://www.douyin.com'));
       final hasSession = cookies.any((c) =>
           c.name == 'sessionid' &&
           (c.value?.isNotEmpty ?? false) &&
