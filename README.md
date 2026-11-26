@@ -79,18 +79,32 @@ media_saver/
    掩码过大时退回洋葱扩散。第二遍用弱阈值复扫残影。
 4. 任一步不确定（无水印 / 白色内容过多 / GIF / 解码失败 / 修补后整体接近纯白）都原样保存，不做破坏。
 
-### 抖音：作者主页作品抓取（build 117，2026-11-12）
+### 抖音：作者主页作品抓取（build 121，2026-11-26）
 
 识别 `/user/{sec_uid}` 主页链接（作品分享 URL query 里的 `sec_uid` 不算），
 复用离屏 WebView 走桌面 `www.douyin.com/user/{secUid}` 页：
 
 - **数据源**：页面自己发出的 `aweme/v1/web/aweme/post/` 响应（带 a_bogus 签名、
   含完整 `bit_rate` 10 档 / `play_addr` / `music` / `images`，与 detail 结构一致），
-  hook 截获 + 按 `aweme_id` 去重累加；主动 fetch 免签翻页与程序化滚动双驱动。
-- **匿名（未登录）**：服务端只发首批 20 条，翻页被锁（探测实测）。结果页提示
-  "已抓取最近 20 件（作者共 N 件），登录抖音后可抓取全部"。
-- **登录态**：结果页入口 → 扫码登录页（桌面 UA，二维码自动弹出，每 2s 轮询
-  `sessionid` cookie，检测到自动返回）→ 按原链接重新抓取，翻页到 `has_more=false` 全量。
+  hook 截获 + 按 `aweme_id` 去重累加。
+- **翻页只能靠滚动**：自建 fetch 翻页已删除。实测页面发出的 `a_bogus` 是 184 字符、
+  与完整参数强绑定；重放同 URL / `frontierSign` 重新签名 / 改 `max_cursor` / 去签名，
+  **5 种变体全部返回 846KB HTML 风控页**，拿不到 JSON。
+- **滚动容器定位（v4）**：桌面页 `body{overflow-y:hidden}`，
+  `documentElement`/`body` 的 `scrollHeight == clientHeight`、`window.scrollY` 恒 0
+  → `window.scrollBy` 完全无效。真正可滚的是**混淆类名容器**
+  （作品网格 `div.yP5MkONE` + `route-scroll-container`），故 v4 用
+  已知选择器快路 + **BFS 遍历（跳过叶子节点，budget 420）**+ `__capCands` 缓存；
+  DFS 会失败（`body.children.length == 173`，预算被尾部叶子节点吃光）。
+  滚到已知底部时先回弹 260px 再滚到底（同值赋值不产生 scroll 事件）。
+- **匿名（未登录）**：服务端直接返回空列表
+  `{"aweme_list":[],"has_more":0,"not_login_module":{...}}`，页面根本不会翻页
+  → 必须登录。结果页提示"已抓取最近 20 件（作者共 N 件），扫码登录后可抓取全部"。
+- **登录态**：首页原地扫码（离屏 WebView 取码 → `Image.memory` 原生渲染）→
+  按原链接重新抓取，滚动到 `has_more=false` 全量。
+- **抓全判定**：抓到的数量 < 作者总数 → 提示"未能抓全"并给重抓按钮；
+  达到总数 → 提示"已抓取该作者全部 N 件作品"且不再显示重抓按钮。
+  （不再依赖 `has_more`，避免被 `maxIdle` 截断却无任何提示的静默少给。）
 - 每条作品复用单作品解析逻辑（`_extractItems`）：图集/实况/BGM 合成/多清晰度档位全部一致。
 
 ## 构建与巨魔（TrollStore）安装
@@ -134,7 +148,7 @@ flutter build ipa --release --no-codesign   # 巨魔安装无需签名
 | 原图（原始分辨率） | ✅ 图集 | ✅ fileId 原图（无水印） | ✅ large 原图 + 原生去水印 | ✅ name=orig | ⚠️ 仅主图 |
 | 无水印原视频 | ✅ 原画 | ✅ originVideoKey / 最高档 | ✅ 1080p 优先 | ✅ 最高码率 mp4 | ❌ |
 | Live 实况图 | ✅ 图 + 配对视频（含 BGM 合成） | ✅ 图 + `stream` 视频轨 | ✅ type=livephoto + videoSrc | ✅ GIF 转真 Live | ❌ |
-| 作者主页全部作品 | ✅ 登录后全量（首页原地扫码，扫完自动重抓） | ❌ | ❌ | ❌ | ❌ |
+| 作者主页全部作品 | ✅ 登录后全量（滚动 v4 定位混淆容器，抓全/未抓全均有明确提示） | ❌ | ❌ | ❌ | ❌ |
 
 ## 已知限制
 
@@ -146,11 +160,30 @@ flutter build ipa --release --no-codesign   # 巨魔安装无需签名
   cookie（UIFID）才 200，捕获链路靠离屏 WebView 注入，冷启动首帧可能较慢。
 - **抖音作者主页**：2026-11-26 起匿名已拿不到作品列表（服务端直接返回空体），
   必须先在首页扫码登录抖音；登录一次后 cookie 长期有效，之后直接从首页粘贴链接即可。
+  **必须靠滚动加载，不能自建 fetch 翻页**（`a_bogus` 与完整参数强绑定，
+  重放/重签/改参全部落到风控 HTML）；滚动驱动靠 BFS 定位混淆类名容器，
+  平台改混淆规则时需重新探测容器。
   抓取耗时随作品数线性增长（每件作品解析到媒体项，128 件约 40~90s）。
 - 平台接口会不定期变更，字段失效时参照 `docs/平台解析链路说明.md` 用 mitmproxy 抓包更新。
 
 ## 变更记录
 
+- **v1.2.0 (build 121)**
+  - 抖音作者主页**作品爬不全**修复：定位并修掉两个真 bug
+    - ① `window.scrollBy` / `document.scrollingElement` **完全无效**
+      —— 实测 `body{overflow-y:hidden}`，`scrollHeight == clientHeight == 900`，
+      `window.scrollBy(0,2600)` 后 `window.scrollY` 仍为 0；v3 却把它们当主力兜底
+      → 页面实际一下都没滚
+    - ② 真容器是**混淆类名** `div.yP5MkONE`（作品网格）+ `route-scroll-container`
+      —— v3 的 `[class*="scroll"]/[class*="list"]` 只命中后者，漏掉装作品卡片的网格
+    - v4 定位策略：已知选择器快路 + BFS（**跳过叶子节点**，budget 420）
+      + `__capCands` 缓存（`isConnected` 校验）；滚到已知底部先回弹 260px 再滚到底
+    - 实测（390×844 视口直接跑脚本）：`cands:2 moved:2 tops:["366/366","57/57"]`
+      → 第 2 轮 `tops:["366/366","105/105"]`（页面确实在追加）→ 第 3 轮 `moved:0`
+    - 预算放宽：`budget 150→240s`、`maxIdle 6→8`、`maxItems 600→800`、匿名 `25→20s`
+  - 删除自建 fetch 翻页死代码（`_pullPostsJs`）：5 种签名变体全部返回 846KB 风控页
+  - 修静默少给：截断提示不再依赖 `has_more`，改判「已抓 < 作者总数」→ 提示重抓；
+    抓全时提示「已抓取该作者全部 N 件作品」且隐藏重抓按钮
 - **v1.2.0 (build 120)**
   - 抖音登录改为**首页原地扫码**（不再跳整页登录页）
     - 原因：抖音桌面登录弹窗实测宽约 620px，390pt 窄屏下二维码右侧被裁、
