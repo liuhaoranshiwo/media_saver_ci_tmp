@@ -71,13 +71,32 @@ const _profileHookJs = '''
 (function(){
   if (window.__profInstalled) return; window.__profInstalled = true;
   function post(name, val){ try{ window.flutter_inappwebview.callHandler(name, val); }catch(e){} }
+
+  // ⚠️ build 122 修正：原来 isPostText 只判断响应体里有没有 `aweme_list`，
+  //   **完全不看请求 URL** —— 而抖音主页还会发 `aweme/related`（相关推荐）、
+  //   `aweme/search`、`feed` 等接口，响应结构同为 `{aweme_list:[...]}`。
+  //   这些非作者作品的数据会被原样收进 _postItems，导致
+  //   「已抓件数」虚高、与作者真实作品数对不上。
+  //   → 现在必须同时满足「URL 是 aweme/post」才上报。
+  function isPostUrl(u){
+    try {
+      if (u && typeof u === 'object') u = u.url ? u.url : String(u);
+      u = String(u || '');
+      return u.indexOf('aweme/post') >= 0;
+    } catch(e) { return false; }
+  }
   function isPostText(t){ return typeof t === 'string' && t.indexOf('aweme_list') >= 0; }
+
   var of = window.fetch;
   if (of) {
-    window.fetch = function(){
+    window.fetch = function(input, init){
       var p = of.apply(this, arguments);
       try {
-        p.then(function(res){ res.clone().text().then(function(t){ if (isPostText(t)) post('capPosts', t); }); });
+        if (isPostUrl(input)) {
+          p.then(function(res){
+            try { res.clone().text().then(function(t){ if (isPostText(t)) post('capPosts', t); }); } catch(e){}
+          });
+        }
       } catch(e){}
       return p;
     };
@@ -88,7 +107,8 @@ const _profileHookJs = '''
   XMLHttpRequest.prototype.send = function(){
     var xhr = this;
     xhr.addEventListener('load', function(){
-      try { if (isPostText(xhr.responseText)) post('capPosts', xhr.responseText); } catch(e){}
+      // 双条件：接口必须是 aweme/post，且响应含 aweme_list
+      try { if (isPostUrl(xhr.__profUrl) && isPostText(xhr.responseText)) post('capPosts', xhr.responseText); } catch(e){}
     });
     return os.apply(this, arguments);
   };
@@ -375,6 +395,10 @@ class DouyinCapture {
   Map<String, dynamic>? _profileInfo;
   Completer<bool>? _newPostsSignal;
 
+  /// 目标作者的 sec_uid（build 122）：用于校验 aweme_list 里的作品归属，
+  /// 防止相关推荐流（同样返回 aweme_list 结构）混入导致数量虚高。
+  String _targetSecUid = '';
+
   void attach(InAppWebViewController controller) {
     _controller = controller;
     controller.addJavaScriptHandler(
@@ -460,8 +484,21 @@ class DouyinCapture {
             final list = d['aweme_list'];
             if (list is List) {
               var added = 0;
+              var foreign = 0;
               for (final it in list) {
                 if (it is Map && it['aweme_id'] != null) {
+                  // ⚠️ build 122：作者归属二次校验（最后一道防线）。
+                  //   hook 已按 URL 只接 aweme/post，但若平台日后把推荐流也挂到
+                  //   同一接口、或 hook 被页面重装覆盖，这里仍可能混入他人作品。
+                  //   有 sec_uid 且与目标作者不一致 → 丢弃，避免数量虚高。
+                  final a = it['author'];
+                  if (a is Map && _targetSecUid.isNotEmpty) {
+                    final au = '${a['sec_uid'] ?? ''}';
+                    if (au.isNotEmpty && au != _targetSecUid) {
+                      foreign++;
+                      continue;
+                    }
+                  }
                   final id = '${it['aweme_id']}';
                   if (!_postItems.containsKey(id)) {
                     _postItems[id] = (it as Map).cast<String, dynamic>();
@@ -475,7 +512,8 @@ class DouyinCapture {
               final mc = d['max_cursor'];
               if (mc is num) _postCursor = mc.toInt();
               AppLogger.log('dy-user',
-                  'post 响应: +$added (总${_postItems.length}) has_more=$_postHasMore cursor=$_postCursor');
+                  'post 响应: +$added (总${_postItems.length}) has_more=$_postHasMore '
+                  'cursor=$_postCursor${foreign > 0 ? " 已丢弃他人作品$foreign条" : ""}');
               if (added > 0 &&
                   _newPostsSignal != null &&
                   !_newPostsSignal!.isCompleted) {
@@ -763,6 +801,7 @@ class DouyinCapture {
     _postHasMore = true;
     _postCursor = 0;
     _profileInfo = null;
+    _targetSecUid = secUid; // 作品归属校验用（见 capPosts 回调）
     _newPostsSignal = Completer<bool>();
 
     final loggedIn = await _douyinLoggedIn();
@@ -875,6 +914,7 @@ class DouyinCapture {
       return {
         '__userPosts': const [],
         '__userMore': true,
+        '__userComplete': false,
         '__userLoggedIn': loggedIn,
         '__userNeedLogin': !loggedIn,
         if (nickname is String) '__userNickname': nickname,
@@ -883,9 +923,14 @@ class DouyinCapture {
     }
     AppLogger.log('dy-user',
         '主页抓取结束: ${_postItems.length} 件 has_more=$_postHasMore 耗时=${sw.elapsedMilliseconds}ms');
+    // ⚠️ build 122：把「翻页是否自然结束」与「服务端还有没有下一页」分开上报。
+    //   原 `__userMore = _postHasMore && len < maxItems` 把「撞上 maxItems 上限」
+    //   也算成 has_more=false → 上层误判为"已抓全"。
+    //   __userComplete 只在服务端明确说 has_more=false 时才为 true。
     return {
       '__userPosts': _postItems.values.toList(),
-      '__userMore': _postHasMore && _postItems.length < maxItems,
+      '__userMore': _postHasMore,
+      '__userComplete': !_postHasMore,
       '__userLoggedIn': loggedIn,
       '__userNeedLogin': false,
       if (_profileInfo?['nickname'] is String)
