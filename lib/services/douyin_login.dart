@@ -120,10 +120,13 @@ class DouyinLogin {
   }
 
   /// 换一张码（用户点「刷新二维码」时）
+  ///
+  /// 不用 reload()：对话框关闭时页面已被换成 about:blank，reload 只会
+  /// 重载空白页，永远拿不到新码。统一走 start(force: true) 重新进引导页。
   Future<void> refresh() async {
     _lastQr = null;
     try {
-      await _controller?.reload();
+      await start(force: true);
       AppLogger.log('dy-login', '手动刷新二维码');
     } catch (_) {}
   }
