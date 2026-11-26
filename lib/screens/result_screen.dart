@@ -515,6 +515,7 @@ class _ResultScreenState extends State<ResultScreen> {
         ParsePlatform.weibo => '微博 · 解析结果',
         ParsePlatform.xianyu => '闲鱼 · 解析结果',
         ParsePlatform.twitter => 'X（推特）· 解析结果',
+        ParsePlatform.bilibili => 'B 站 · 解析结果',
         ParsePlatform.unknown => '解析结果',
       };
 }
