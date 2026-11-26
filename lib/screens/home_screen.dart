@@ -7,6 +7,7 @@ import '../services/app_logger.dart';
 import '../services/proxy_config.dart';
 import '../services/saver_channel.dart';
 import '../theme/app_theme.dart';
+import 'douyin_login_screen.dart';
 import 'result_screen.dart';
 
 /// 首页：粘贴链接 → 解析
@@ -21,6 +22,9 @@ class _HomeScreenState extends State<HomeScreen> {
   final _controller = TextEditingController();
   bool _loading = false;
   String? _error;
+
+  /// 上次失败是否因"需要登录"（抖音主页）—— 错误区显示登录按钮
+  bool _needLogin = false;
   bool _clipboardChecked = false;
   bool _hasProxy = false;
 
@@ -71,12 +75,16 @@ class _HomeScreenState extends State<HomeScreen> {
     FocusScope.of(context).unfocus();
     final text = _controller.text.trim();
     if (text.isEmpty) {
-      setState(() => _error = '请先粘贴分享链接或文案');
+      setState(() {
+        _error = '请先粘贴分享链接或文案';
+        _needLogin = false;
+      });
       return;
     }
     setState(() {
       _loading = true;
       _error = null;
+      _needLogin = false;
     });
     AppLogger.setContext('解析: $text');
     AppLogger.log('parse', '开始解析');
@@ -91,7 +99,10 @@ class _HomeScreenState extends State<HomeScreen> {
     } on ParseException catch (e) {
       AppLogger.log('parse', '解析失败: ${e.message}');
       AppLogger.report(e.message);
-      setState(() => _error = e.message);
+      setState(() {
+        _error = e.message;
+        _needLogin = e.needLogin;
+      });
     } catch (e) {
       AppLogger.log('parse', '解析异常: $e');
       AppLogger.report('解析异常: $e');
@@ -99,6 +110,14 @@ class _HomeScreenState extends State<HomeScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  /// 需要登录时：打开扫码登录页 → 成功后自动重新解析
+  Future<void> _loginThenRetry() async {
+    final ok = await Navigator.of(context).push<bool>(
+        MaterialPageRoute(builder: (_) => const DouyinLoginScreen()));
+    if (ok != true || !mounted) return;
+    await _parse();
   }
 
   Future<void> _openAiSettings() async {
@@ -279,7 +298,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     decoration: const InputDecoration(
                       hintText: '粘贴分享链接或整段分享文案…',
                     ),
-                    onChanged: (_) => setState(() => _error = null),
+                    onChanged: (_) => setState(() {
+                      _error = null;
+                      _needLogin = false;
+                    }),
                   ),
                 ),
                 if (_controller.text.isNotEmpty)
@@ -287,7 +309,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     icon: const Icon(Icons.close, color: AppColors.textTertiary),
                     onPressed: () {
                       _controller.clear();
-                      setState(() => _error = null);
+                      setState(() {
+                        _error = null;
+                        _needLogin = false;
+                      });
                     },
                   ),
               ],
@@ -296,6 +321,18 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(height: AppSpacing.s),
               Text(_error!,
                   style: AppText.body.copyWith(color: AppColors.danger)),
+              // 需要登录（抖音主页）→ 直达扫码登录，成功后自动重试
+              if (_needLogin) ...[
+                const SizedBox(height: AppSpacing.m),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: _loading ? null : _loginThenRetry,
+                    icon: const Icon(Icons.login, size: 18),
+                    label: const Text('登录抖音后重试'),
+                  ),
+                ),
+              ],
             ],
             const SizedBox(height: AppSpacing.l),
             FilledButton(
