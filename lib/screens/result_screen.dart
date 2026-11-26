@@ -358,8 +358,9 @@ class _ResultScreenState extends State<ResultScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(r.notice!, style: AppText.caption),
-                  // "已抓全"是完成状态，不该再给重抓入口（给了反而让人以为没抓全）
-                  if (!r.notice!.contains('全部')) ...[
+                  // build 122：改用显式 complete 标志，不再靠文案里有没有"全部"
+                  // （文案一改口径就失效 —— 改「账号共 N 件」时立刻踩到）
+                  if (!r.complete) ...[
                     const SizedBox(height: AppSpacing.xs),
                     GestureDetector(
                       onTap: _refetching ? null : _refetchAll,
@@ -435,8 +436,13 @@ class _ResultScreenState extends State<ResultScreen> {
                             BorderRadius.circular(AppRadius.chip),
                       ),
                       child: Text(
-                        '共 ${r.items.length} 项：图片 ${r.imageCount} · '
-                        '视频 $videoCount · Live $liveCount\n'
+                        // build 122：明确这是「媒体文件数」而非「作品数」。
+                        // 图集作品会拆成多项（3 图 → 3 视频），与作品数天然不等，
+                        // 不点明用户就会以为"数量对不上"。
+                        // 单作品解析不存在口径歧义，不必加这行说明。
+                        '共 ${r.items.length} 个媒体文件：'
+                        '图片 ${r.imageCount} · 视频 $videoCount · Live $liveCount'
+                        '${r.isProfile ? "\n（作者主页按作品拆分，图集/实况作品可能产生多个文件）" : ""}\n'
                         '所有文件均为原始分辨率/原始码率，仅供个人使用。',
                         style: AppText.caption),
                     ),
