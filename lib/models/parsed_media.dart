@@ -66,6 +66,18 @@ class ParseResult {
   /// 抖音作者主页匿名抓取时被登录墙截断 → "已抓取 N 件（共 M 件），登录后可抓全部"
   final String? notice;
 
+  /// 此次抓取是否已完整（build 122）
+  ///
+  /// 结果页据此决定要不要给"重新抓取"入口。原先靠 `notice.contains('全部')`
+  /// 判断，文案一改就失效（build 122 改口径时立刻踩到）→ 改成显式标志。
+  final bool complete;
+
+  /// 结果来自作者主页（多作品聚合，build 122）
+  ///
+  /// 作者主页的「作品数」与「媒体文件数」天然不等（一个图集拆成多项），
+  /// 结果页需要据此补一句口径说明；单作品解析没有这个问题。
+  final bool isProfile;
+
   const ParseResult({
     required this.platform,
     required this.sourceUrl,
@@ -75,6 +87,8 @@ class ParseResult {
     required this.items,
     required this.parsedAt,
     this.notice,
+    this.complete = false,
+    this.isProfile = false,
   });
 
   bool get hasLivePhoto => items.any((e) => e.isLivePhoto);
