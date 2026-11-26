@@ -367,7 +367,7 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(height: AppSpacing.xl),
             Text('粘贴链接，保存原图', style: AppText.title.copyWith(fontSize: 26)),
             const SizedBox(height: AppSpacing.s),
-            Text('支持小红书 / 微博 / 抖音 / 闲鱼，原图 · 原视频 · Live 图',
+            Text('支持小红书 / 微博 / 抖音 / 闲鱼 / B 站，原图 · 原视频 · Live 图',
                 style: AppText.secondary),
             const SizedBox(height: AppSpacing.xl),
             Row(
