@@ -218,13 +218,19 @@ class DouyinParser extends MediaParser {
       throw ParseException('主页作品全部无法解析（私密或审核中的作品不可下载）');
     }
 
-    // 截断提示：区分"未登录"（正常锁 20 条）与"登录了但翻页中断"（网络/风控），
-    // 两者的用户动作不同：前者扫码登录重抓，后者直接点重试
+    // 截断提示：区分"未登录"（服务端锁死）与"登录了但翻页中断"（网络/风控/轮次用尽），
+    // 两者的用户动作不同：前者扫码登录重抓，后者直接点重试。
+    //
+    // ⚠️ build 121 修正：原来只在 `hasMore==true` 时才提示，导致
+    //   「抓取被 maxIdle/预算截断、但服务端 has_more 恰好已是 false」时
+    //   **静默少给作品**（用户看到的就是"作品爬不全"却没有任何提示）。
+    //   现在改为：只要「已抓数量 < 作者作品总数」就提示，不再依赖 has_more。
     String? notice;
     final loggedIn = cap['__userLoggedIn'] == true;
-    if (hasMore) {
-      final total = totalCount ?? 0;
-      final grabbed = posts.length;
+    final total = totalCount ?? 0;
+    final grabbed = posts.length;
+    final looksShort = total > 0 && grabbed < total;
+    if (looksShort || hasMore) {
       final withTotal = total > grabbed && total > 0;
       if (!loggedIn) {
         notice = withTotal
@@ -233,10 +239,13 @@ class DouyinParser extends MediaParser {
             : '当前未登录抖音，仅抓取到 $grabbed 件。点下方登录后自动抓取全部作品';
       } else {
         notice = withTotal
-            ? '已抓取 $grabbed 件（作者共 $total 件），翻页提前结束'
-                '（网络或风控），可点下方重新抓取'
+            ? '已抓取 $grabbed 件（作者共 $total 件）。'
+            '${hasMore ? "翻页提前结束（网络或风控）" : "未能抓全，可能是平台限流"}，'
+                '可点下方重新抓取'
             : '翻页提前结束（网络或风控），已抓 $grabbed 件，可点下方重新抓取';
       }
+    } else if (total > 0 && grabbed >= total) {
+      notice = '已抓取该作者全部 $grabbed 件作品';
     }
 
     return ParseResult(
