@@ -358,18 +358,21 @@ class _ResultScreenState extends State<ResultScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(r.notice!, style: AppText.caption),
-                  const SizedBox(height: AppSpacing.xs),
-                  GestureDetector(
-                    onTap: _refetching ? null : _refetchAll,
-                    child: Text(
-                        (r.notice ?? '').contains('未登录')
-                            ? '→ 登录抖音后抓取全部作品'
-                            : '→ 重新抓取全部作品',
-                        style: const TextStyle(
-                            color: AppColors.primary,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13)),
-                  ),
+                  // "已抓全"是完成状态，不该再给重抓入口（给了反而让人以为没抓全）
+                  if (!r.notice!.contains('全部')) ...[
+                    const SizedBox(height: AppSpacing.xs),
+                    GestureDetector(
+                      onTap: _refetching ? null : _refetchAll,
+                      child: Text(
+                          r.notice!.contains('未登录')
+                              ? '→ 登录抖音后抓取全部作品'
+                              : '→ 重新抓取全部作品',
+                          style: const TextStyle(
+                              color: AppColors.primary,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13)),
+                    ),
+                  ],
                 ],
               ),
             ),
