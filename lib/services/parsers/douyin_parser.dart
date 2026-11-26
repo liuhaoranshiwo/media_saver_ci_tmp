@@ -165,7 +165,7 @@ class DouyinParser extends MediaParser {
       cap = null;
     }
     if (cap == null) {
-      final msg = '主页抓取失败：页面未返回作品数据（稍后重试或检查链接）';
+      final msg = '主页抓取失败：页面未返回数据（稍后重试或检查链接）';
       AppLogger.log('dy-user', msg);
       AppLogger.report(msg);
       throw ParseException(msg);
@@ -176,6 +176,26 @@ class DouyinParser extends MediaParser {
     final hasMore = cap['__userMore'] == true;
     final nickname = (cap['__userNickname'] as String?) ?? '';
     final totalCount = (cap['__userCount'] as num?)?.toInt();
+    final needLogin = cap['__userNeedLogin'] == true ||
+        (!(cap['__userLoggedIn'] == true) && posts.isEmpty);
+
+    // 匿名无数据：抖音已不向未登录用户返回作品列表（2026-11-26 实测）
+    // → 抛 needLogin 异常，首页渲染"登录抖音"按钮，登录后自动重试
+    if (posts.isEmpty && needLogin) {
+      final msg = '抖音主页作品需要登录后抓取'
+          '${totalCount != null && totalCount > 0 ? "（该作者共 $totalCount 件）" : ""}'
+          '。抖音已不再向未登录用户返回作品列表';
+      AppLogger.log('dy-user', msg);
+      throw ParseException(msg, needLogin: true);
+    }
+
+    // 已登录但 posts 为空 → 明确失败（不是登录问题，是风控/网络）
+    if (posts.isEmpty) {
+      final msg = '主页抓取失败：已登录但未获取到作品列表（平台风控或网络，稍后重试）';
+      AppLogger.log('dy-user', msg);
+      AppLogger.report(msg);
+      throw ParseException(msg);
+    }
 
     final items = <ParsedMediaItem>[];
     var skipped = 0;
