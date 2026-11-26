@@ -241,13 +241,15 @@ const _qrHookJs = r'''
   }
 
   // 扫码确认后抖音常把面板换成“登录成功”页，cookie 也可能写入 httpOnly
-  // 读不到，此时靠页面文案兜底
+  // 读不到，此时靠页面文案兜底。但页面出现"扫码成功"只代表手机已扫，
+  // 用户还要在 App 里点确认 —— 所以这里只当作"可以去查 cookie 了"的信号，
+  // 真正判定仍由 Dart 侧 checkSession() 做。
   function checkText(){
     if (loginSent) return;
     try {
       var t = String(document.body ? document.body.innerText : '');
       if (t.length > 4000) t = t.substring(0, 4000);
-      if (t.indexOf('扫码成功') >= 0 || t.indexOf('登录成功') >= 0) {
+      if (t.indexOf('登录成功') >= 0) {
         loginSent = true;
         upLogin();
       }
