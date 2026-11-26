@@ -166,6 +166,30 @@ class Downloader {
         {},
       ];
     }
+    // B 站：bilivideo/bilivod 直链**必须**带 bilibili.com Referer
+    // （2026-11-26 实测：裸请求/无 UA 一律 403 返回 150 字节 HTML，
+    //   带 Referer 才 200 + accept-ranges=bytes）。hdslb.com 图片同样校验。
+    if (host.contains('bilivideo') ||
+        host.contains('bilivod') ||
+        host.contains('bilibili') ||
+        host.contains('hdslb.com')) {
+      return [
+        {'Referer': 'https://www.bilibili.com/'},
+        {
+          '__ua':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                  '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Referer': 'https://www.bilibili.com/',
+        },
+      ];
+    }
+    // 闲鱼/淘宝：img.alicdn.com 一般不校验 Referer，但带 taobao Referer 更稳
+    if (host.contains('alicdn') || host.contains('goofish') || host.contains('tb.cn')) {
+      return [
+        {},
+        {'Referer': 'https://h5.m.goofish.com/'},
+      ];
+    }
     // 其他域名：裸请求即可
     return [
       {},
