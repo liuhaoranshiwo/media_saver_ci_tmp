@@ -3,6 +3,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'services/douyin_capture.dart';
+import 'services/douyin_login.dart';
 import 'services/ai_settings.dart';
 import 'services/app_logger.dart';
 import 'services/app_settings.dart';
@@ -50,6 +51,8 @@ class MediaSaverApp extends StatelessWidget {
           const HomeScreen(),
           // 抖音解析依赖的离屏 WebView（屏幕外，不可见，勿删）
           const DouyinCaptureView(),
+          // 抖音扫码登录取码用的离屏 WebView（同样不可见，勿删）
+          const DouyinLoginHost(),
         ],
       ),
     );
