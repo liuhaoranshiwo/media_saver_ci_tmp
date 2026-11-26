@@ -1,6 +1,6 @@
 # 原存 · 去水印解析保存 App
 
-支持 **小红书 / 微博 / 抖音 / X（推特）/ 闲鱼** 分享链接解析，保存 **原图 / 原视频 / Live 实况图**（非预览压缩版）。
+支持 **小红书 / 微博 / 抖音 / X（推特）/ 闲鱼 / B 站** 分享链接解析，保存 **原图 / 原视频 / Live 实况图**（非预览压缩版）。
 
 > ⚠️ 合规提醒：解析与保存功能仅供个人学习、备份及保存本人有权使用的内容；
 > 他人作品版权归原作者所有，请勿去除水印后二次分发或商用。
@@ -143,12 +143,13 @@ flutter build ipa --release --no-codesign   # 巨魔安装无需签名
 
 ## 功能与状态
 
-| 能力 | 抖音 | 小红书 | 微博 | X（推特） | 闲鱼 |
-|---|---|---|---|---|---|
-| 原图（原始分辨率） | ✅ 图集 | ✅ fileId 原图（无水印） | ✅ large 原图 + 原生去水印 | ✅ name=orig | ⚠️ 仅主图 |
-| 无水印原视频 | ✅ 原画 | ✅ originVideoKey / 最高档 | ✅ 1080p 优先 | ✅ 最高码率 mp4 | ❌ |
-| Live 实况图 | ✅ 图 + 配对视频（含 BGM 合成） | ✅ 图 + `stream` 视频轨 | ✅ type=livephoto + videoSrc | ✅ GIF 转真 Live | ❌ |
-| 作者主页全部作品 | ✅ 登录后全量（滚动 v4 定位混淆容器，抓全/未抓全均有明确提示） | ❌ | ❌ | ❌ | ❌ |
+| 能力 | 抖音 | 小红书 | 微博 | X（推特） | 闲鱼 | B 站 |
+|---|---|---|---|---|---|---|
+| 原图（原始分辨率） | ✅ 图集 | ✅ fileId 原图（无水印） | ✅ large 原图 + 原生去水印 | ✅ name=orig | ✅ 全部原图（imageInfos，实测 1440×1920） | ✅ 封面原图（hdslb archive，无缩放后缀） |
+| 无水印原视频 | ✅ 原画 | ✅ originVideoKey / 最高档 | ✅ 1080p 优先 | ✅ 最高码率 mp4 | ⚠️ 按值识别（字段名未确认） | ✅ durl 单文件 mp4（含音频） |
+| Live 实况图 | ✅ 图 + 配对视频（含 BGM 合成） | ✅ 图 + `stream` 视频轨 | ✅ type=livephoto + videoSrc | ✅ GIF 转真 Live | ❌ | ❌ |
+| 作者主页全部作品 | ✅ 登录后全量（滚动 v4 定位混淆容器，抓全/未抓全均有明确提示） | ❌ | ❌ | ❌ | ❌ | ❌ |
+| 多分 P / 番剧集 | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ 每个分 P 独立视频项 |
 
 ## 已知限制
 
@@ -163,11 +164,93 @@ flutter build ipa --release --no-codesign   # 巨魔安装无需签名
   **必须靠滚动加载，不能自建 fetch 翻页**（`a_bogus` 与完整参数强绑定，
   重放/重签/改参全部落到风控 HTML）；滚动驱动靠 BFS 定位混淆类名容器，
   平台改混淆规则时需重新探测容器。
+  **数量口径**：主页显示的「作品数」是账号总量（含私密/审核中/仅好友可见），
+  `aweme/post` 只能取到公开作品 —— 二者对不上是正常的，结果页会如实说明差额原因；
+  而「共 X 个媒体文件」是按文件计的，一个图集作品会拆成多项（3 图 → 3 视频），
+  所以文件数通常大于作品数。
   抓取耗时随作品数线性增长（每件作品解析到媒体项，128 件约 40~90s）。
+- **B 站**：走 `fnval=0` 的 **durl**（单文件 mp4，音视频已合好），不走 DASH。
+  匿名态下 DASH 最高只给 480×852，**画质反而比 durl 的 720P 更低**，还要额外下音轨合成。
+  实测 1080×1920 竖屏视频请求 `qn=80` 实际回报 `quality=64`（720P）—— 分辨率按视频本身走。
+  下载**必须带 `Referer: https://www.bilibili.com/`**（裸请求 403 返回 150 字节 HTML），
+  已在 `Downloader._headerVariants` 按域名自动注入；`bilivideo` 域名支持 Range。
+  超长视频 `durl` 会分多段，当前**只取第一段**（会打日志告警），本版不做分段合并。
+- **闲鱼**：详情走 mtop 两步签名（`_m_h5_tk` → `sign=md5(token&t&appKey&data)`），
+  能拿到 `imageInfos` 全部原图，远优于旧的单张 `og:image`。
+  **接口有 IP 级频控**（`RGV587_ERROR::SM::哎哟喂,被挤爆啦`，且不下发 token）：
+  单次解析只发 2 个请求，命中概率低；失败按 3s/8s/18s 退避重试，
+  仍失败则降级到分享页 `og:image` 并在结果页提示"限流 / 降级模式"，不会静默失败。
+  **视频字段名未确认**（被探测商品本身无视频，且探测期间 IP 已被 `x5secdata` 滑块锁定，
+  推荐/搜索接口也拿不到可用 itemId）→ 实现改为**按值识别**：递归遍历整个 `itemDO`，
+  凡值形如 `.mp4/.mov/.flv` 或域名含 `vod/play` 即收下，不依赖字段名；
+  代价是**若闲鱼把播放地址做成加密串或需二级签名接口**（如 `mtop.taobao.idle.video.play`）
+  则取不到，表现为"未发现视频"而非报错。HLS（`.m3u8`）主动跳过 —— 下载器只会存下播放列表文本。
 - 平台接口会不定期变更，字段失效时参照 `docs/平台解析链路说明.md` 用 mitmproxy 抓包更新。
 
 ## 变更记录
 
+- **v1.2.0 (build 123)**
+  - **新增 B 站解析**（`lib/services/parsers/bilibili_parser.dart`）
+    - 链路全部**纯 HTTP 匿名可用**，无需 cookie、无需 wbi 签名：
+      `x/web-interface/view?bvid=` 取元信息 → 每个分 P 逐个
+      `x/player/playurl?avid=&cid=&qn=80&fnval=0&fnver=0&fourk=1`
+      取 `data.durl[0].url`（**单文件 mp4，视频+音频同文件**，不用合轨）
+    - **为什么不用 DASH**：实测同一视频匿名态下 `fnval=16` 最高只给 480×852，
+      比 durl 的 720P 更低，且是音视频分离的 `.m4s`，要多下一条音轨再合成 →
+      固定走 `fnval=0`
+    - 支持 `BV1xxxx` / `av\d+` / `b23.tv` 短链（短链自动展开）；
+      多分 P 全部展开为独立视频项，分 P 之间留 400ms 防频控
+    - 封面 `data.pic` 即原图（`hdslb.com/bfs/archive/*.jpg`，无 `@` 缩放后缀），
+      作为附加图片项输出
+    - **下载必须带 `Referer: https://www.bilibili.com/`**：实测裸请求 / 无 UA
+      一律 403（返回 150 字节 HTML），带 Referer 才 200 + `accept-ranges: bytes`
+      → `Downloader._headerVariants` 按域名（bilivideo/bilivod/bilibili/hdslb）注入
+  - **闲鱼从"单张主图"升级为"全量图片 + 视频识别"**
+    （`lib/services/parsers/xianyu_parser.dart` 完全重写）
+    - 旧实现只从分享页 HTML 抠 `og:image`，最多一张主图
+    - 新实现走商品详情 mtop 接口，**两步签名**：
+      ① 不带 token 请求（必然 `FAIL_SYS_TOKEN_EMPTY`）→ 从 Set-Cookie 取
+      `_m_h5_tk=<token>_<ts>` + `_m_h5_tk_enc`；
+      ② `sign = md5(token & t & appKey & data)`，token 取**下划线前**那段。
+      两个必须踩对的细节：cookie 要回传**完整** `token_timestamp`（只传 token 仍报空），
+      且 `_m_h5_tk_enc` 必须一起带
+    - body 用 `Uri.encodeComponent`（空格 → `%20`）而非 `encodeQueryComponent`
+      （`+`），并**显式设 Content-Length** —— mtop 网关不支持 chunked
+    - 拿到 `imageInfos[]` **全部原图**（实测 4 张 1440×1920，不带
+      `_640x640q90.jpg` 缩放后缀），每张带 `widthSize/heightSize`
+    - 视频改为**按值识别**（递归遍历整个 `itemDO` 找 `.mp4/.mov/.flv`
+      或 `vod/play` 域名），**不猜字段名**；理由与已知限制见上方「已知限制」
+    - 风控处理：命中 `RGV587` / 被挤爆 / 令牌为空时按 3s/8s/18s 退避重试，
+      仍失败则降级 `og:image` 并在结果页提示"限流 / 降级模式"，不静默失败
+    - 纯 Dart 实现 MD5（`_kTable` + `_rotl`），不引入 crypto 依赖
+  - 平台枚举新增 `bilibili`；`ParserService.detect` 补 `bilibili.com`、
+    `b23.tv`（含 `*.b23.tv`）、`m.tb.cn` / `tb.cn`（闲鱼短链原先识别不到）；
+    不支持提示文案、首页副标题、结果页标题同步加入 B 站
+- **v1.2.0 (build 122)**
+  - 抖音作者主页**结果页数量对不上**修复（登录态抓同一作者数量不一致）
+    - ① **hook 不校验接口来源（真 bug，会让作品数虚高）**
+      `_profileHookJs` 的 `isPostText` 只判断响应体有没有 `aweme_list`，
+      **完全不看请求 URL**。主页还会发 `aweme/related`（相关推荐）、
+      `aweme/search`、`feed` 等接口，响应结构同为 `{aweme_list:[...]}`
+      → 非作者作品被原样收进 `_postItems`
+      → 修：`fetch` / `XHR` 两路都加 `isPostUrl`，只接 `aweme/post`
+    - ② **补作品归属二次校验**（最后一道防线）
+      `_targetSecUid` 记录目标作者，`capPosts` 回调校验
+      `item.author.sec_uid`，不一致直接丢弃并记日志；
+      无 `author` / `sec_uid` 为空时**不拦**（避免误伤）
+    - ③ **完成判定用错依据（会漏报"已抓全"）**
+      `aweme_count` 是**账号总量**，含私密/审核中/仅好友可见作品，
+      `aweme/post` 永远取不到 → 只能当"参考上限"，不是"应抓数"
+      原来 `grabbed >= total` 就断言"全部"，真抓全时反而可能误判
+      → 新增 `__userComplete`（仅服务端明确 `has_more=false` 时为 true），
+      完成依据改用它；同时 `__userMore` 不再把"撞上 maxItems 上限"算成没有更多
+    - ④ **数量口径混用（"对不上"的直接观感来源）**
+      结果页同时出现「作品 N 件」（`posts` 数）与「共 X 项」（媒体项数），
+      而一个图集作品会拆成多个视频项（3 图 → 3 视频），两者天生不等却无标注
+      → 标题改双口径「N 件作品 · M 个文件」；底部统计改「共 X 个媒体文件」
+      并说明图集/实况会拆分；单作品解析不加此说明（无歧义）
+    - 重抓按钮判断从 `notice.contains('全部')` 改成显式 `complete` 标志
+      （靠文案判断太脆，本次改口径时立刻踩到）
 - **v1.2.0 (build 121)**
   - 抖音作者主页**作品爬不全**修复：定位并修掉两个真 bug
     - ① `window.scrollBy` / `document.scrollingElement` **完全无效**
