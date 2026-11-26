@@ -87,17 +87,27 @@ const _profileHookJs = '''
     });
     return os.apply(this, arguments);
   };
-  // 主页 SSR 的 _ROUTER_DATA 含 userInfo（nickname/aweme_count），轮询上报
+  // SSR 用户信息轮询（2026-11 实测两种结构都要认）：
+  //   移动分享页 iesdouyin/share/user：loaderData["user_(id)/page"].userInfoRes.user_info
+  //   旧桌面页：loaderData[xxx].userInfo.user
+  // 新版桌面页已无 _ROUTER_DATA（只有 RENDER_DATA 且不含作者信息）—— 作者信息
+  // 只能从移动分享页拿，故 captureUserProfile 先加载移动页读它再切桌面抓作品。
   var n = 0;
   var t1 = setInterval(function(){
     n++;
     try {
-      if (window._ROUTER_DATA) {
-        var ld = window._ROUTER_DATA.loaderData || {};
+      var rd = window._ROUTER_DATA;
+      if (rd && rd.loaderData) {
+        var ld = rd.loaderData;
         for (var k in ld) {
           var p = ld[k];
+          if (p && p.userInfoRes && p.userInfoRes.user_info) {
+            post('capPosts', JSON.stringify({__userInfo: p.userInfoRes.user_info}));
+            clearInterval(t1);
+            return;
+          }
           if (p && p.userInfo && p.userInfo.user) {
-            post('capPosts', JSON.stringify({__userInfo: p.userInfo}));
+            post('capPosts', JSON.stringify({__userInfo: p.userInfo.user}));
             clearInterval(t1);
             return;
           }
@@ -132,13 +142,12 @@ try {
 })();
 ''';
 
-/// 程序化滚动驱动 v2（build 118，修"抓不全"）：
-///   build 117 只用 scrollBy —— 它改 scrollTop 但【不派发 wheel 事件】，
-///   而探测时翻页请求是 playwright mouse.wheel（真实输入事件）触发的，
-///   页面懒加载很可能监听 wheel。v2 三管齐下：
-///   ① 派发 WheelEvent（window + body）② window scrollBy + 全部可滚动容器
-///   滚到底再回弹（触发 IntersectionObserver）③ 点"加载更多"按钮。
-///   另保留匿名登录墙移除。
+/// 程序化滚动驱动 v3（build 119）：
+///   v2 遍历 `div,section,main` 全 DOM 读 scrollHeight —— 抖音主页数千元素，
+///   每次读都强制 layout，真机 WebView 会卡死/JSEvaluate 超时（build 118 教训）。
+///   v3 只操作 window + document.scrollingElement + 至多 12 个 scroll/list 候选，
+///   不再全 DOM 遍历；保留 WheelEvent（真实滚轮事件才是懒加载触发源）
+///   与"加载更多"按钮点击、登录墙移除。
 const _scrollProfileJs = '''
 (function(){
   try {
@@ -151,29 +160,32 @@ const _scrollProfileJs = '''
         a = a.parentElement;
       }
     }
-    function fireWheel(el) {
-      try {
-        el.dispatchEvent(new WheelEvent('wheel',
-            {deltaY: 2400, bubbles: true, cancelable: true, view: window}));
-      } catch(e){}
+  } catch(e){}
+  try {
+    window.dispatchEvent(new WheelEvent('wheel',
+        {deltaY: 2400, bubbles: true, cancelable: true, view: window}));
+    if (document.body) {
+      document.body.dispatchEvent(new WheelEvent('wheel',
+          {deltaY: 2400, bubbles: true, cancelable: true, view: window}));
     }
-    fireWheel(window);
-    if (document.body) fireWheel(document.body);
-    try { window.scrollBy(0, 3000); } catch(e){}
-    var els = document.querySelectorAll('div,section,main');
-    for (var i = 0; i < els.length; i++) {
-      var el = els[i];
+  } catch(e){}
+  try { window.scrollBy(0, 2600); } catch(e){}
+  try {
+    var cands = [document.scrollingElement, document.documentElement, document.body];
+    var extra = document.querySelectorAll('[class*="scroll"],[class*="list"],[tabindex="-1"]');
+    for (var i = 0; i < extra.length && i < 12; i++) cands.push(extra[i]);
+    for (var j = 0; j < cands.length; j++) {
+      var el = cands[j];
       try {
-        if (el.scrollHeight > el.clientHeight + 200 && el.clientHeight > 200) {
-          el.scrollTop = el.scrollHeight;
-          (function(e2){
-            setTimeout(function(){ e2.scrollTop = e2.scrollHeight - 600; }, 80);
-          })(el);
+        if (el && el.scrollHeight > el.clientHeight + 200) {
+          el.scrollTop = el.scrollHeight - 200;
         }
       } catch(e){}
     }
+  } catch(e){}
+  try {
     var btns = document.querySelectorAll('[class*="load-more"],[class*="loadMore"]');
-    for (var i = 0; i < btns.length; i++) { try { btns[i].click(); } catch(e){} }
+    for (var i = 0; i < btns.length; i++) { btns[i].click(); }
   } catch(e){}
   return 1;
 })();
@@ -606,23 +618,38 @@ class DouyinCapture {
     return detailItem; // detail 有图集但无实况、DOM 也无 video → 交 parser 保留原结果
   }
 
-  /// 抓取作者主页全部作品（2026-11-12 新增，build 118 调优）。
+  /// 读 WebView cookie 判断抖音登录态（sessionid 存在且非 delete_me）
+  Future<bool> _douyinLoggedIn() async {
+    try {
+      final cookies = await CookieManager.instance()
+          .getCookies(url: WebUri('https://www.douyin.com'));
+      return cookies.any((c) =>
+          c.name == 'sessionid' &&
+          (c.value?.isNotEmpty ?? false) &&
+          c.value != 'delete_me');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 抓取作者主页全部作品（2026-11-12 新增，build 119 重构）。
   ///
-  /// 数据路（探测实测结论）：
-  ///   桌面 www.douyin.com/user/{secUid} 页自己发的 aweme/post 请求带签名、
-  ///   响应含完整 bit_rate/play_addr/music/images —— hook 截获即可；
-  ///   主动 fetch 免签翻页（detail 同思路）为增强路，失败由滚动驱动兜底。
-  ///   匿名被服务端锁首批 20 条（滚动也不发新页）→ 返回 hasMore=true，
-  ///   登录态（WebView cookie 带 sessionid）滚动/翻页可拿全部。
+  /// 2026-11-26 实测（关键变化）：抖音已对**匿名**用户彻底关闭作品列表 ——
+  ///   桌面 aweme/post 返回 {"aweme_list":[], "has_more":0,
+  ///   "not_login_module":{"guide_login_tip_exist":true}}（1027 字节空体）
+  ///   移动 v2 仅 6 条、条目无 play_addr、翻页直接 status_code 11110 shark_fail_1
+  ///   → **登录是唯一可靠路径**。新版桌面页也已无 _ROUTER_DATA / userInfo，
+  ///   作者信息只能从移动分享页 userInfoRes.user_info 拿。
   ///
-  /// build 118 调优（用户反馈"抓不全"）：
-  ///   - 抓取前读 cookie 记录登录态（区分"没登录"与"登录但翻页失效"）
-  ///   - 滚动驱动加 WheelEvent 派发（scrollBy 不触发 wheel —— 探测的翻页
-  ///     请求是 playwright mouse.wheel 触发的）+ 可滚动容器滚到底回弹
-  ///   - 每轮等待 6s→8s、容忍空转 4→6 轮、预算 100s→150s（128 件 ≈ 7 页）
+  /// 流程：
+  ///   ① 读登录态 → ② 移动分享页取作者昵称/作品数（iPhone UA）
+  ///   → ③ 桌面主页 hook 截获 post 响应 + 免签 fetch + 滚动驱动（桌面 UA）
+  ///     · 已登录：budget 150s、空转容忍 6 轮（128 件 ≈ 7 页）
+  ///     · 匿名：只跑 25s 快速判定（服务端必返回空列表），不空等
+  ///   → ④ 空结果时 report 诊断 → 上层据 __userNeedLogin 引导登录
   ///
-  /// 返回 {'__userPosts': [item...], '__userMore': bool,
-  ///        '__userNickname'?: String, '__userCount'?: int}；无可抓数据返回 null。
+  /// 返回 {'__userPosts': [...], '__userMore': bool, '__userLoggedIn': bool,
+  ///        '__userNeedLogin': bool, '__userNickname'?, '__userCount'?}
   Future<Map<String, dynamic>?> captureUserProfile(String secUid,
       {Duration budget = const Duration(seconds: 150),
       int maxItems = 600}) async {
@@ -636,19 +663,34 @@ class DouyinCapture {
     _profileInfo = null;
     _newPostsSignal = Completer<bool>();
 
-    // 登录态诊断（关键：区分"没登录"与"登录但翻页失效"）
-    var loggedIn = false;
-    try {
-      final cookies = await CookieManager.instance()
-          .getCookies(url: WebUri('https://www.douyin.com'));
-      loggedIn = cookies.any((c) =>
-          c.name == 'sessionid' &&
-          (c.value?.isNotEmpty ?? false) &&
-          c.value != 'delete_me');
-    } catch (_) {}
+    final loggedIn = await _douyinLoggedIn();
     AppLogger.log('dy-user',
         '主页抓取启动: sec_uid=${secUid.length}字符 登录态=${loggedIn ? "已登录" : "匿名"}');
 
+    // ---------- ① 移动分享页：作者昵称 / 作品总数 ----------
+    // （桌面新版页无任何作者信息；移动 SSR 的 userInfoRes 是唯一来源）
+    try {
+      await controller.setSettings(
+          settings: InAppWebViewSettings(
+        javaScriptEnabled: true,
+        transparentBackground: true,
+        userAgent: _iosUa,
+        cacheEnabled: true,
+      ));
+      await controller.loadUrl(
+          urlRequest: URLRequest(
+              url: WebUri('https://www.iesdouyin.com/share/user/$secUid')));
+      final infoDeadline = DateTime.now().add(const Duration(seconds: 7));
+      while (_profileInfo == null && DateTime.now().isBefore(infoDeadline)) {
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+      AppLogger.log('dy-user',
+          '作者信息: ${_profileInfo?['nickname']} aweme_count=${_profileInfo?['aweme_count']}');
+    } catch (e) {
+      AppLogger.log('dy-user', '移动分享页取作者信息失败: $e');
+    }
+
+    // ---------- ② 桌面主页：抓作品列表 ----------
     try {
       await controller.setSettings(
           settings: InAppWebViewSettings(
@@ -657,22 +699,19 @@ class DouyinCapture {
         userAgent: _desktopUa,
         cacheEnabled: true,
       ));
-    } catch (e) {
-      AppLogger.log('dy-user', '切桌面 UA 失败: $e');
-    }
-    try {
       await controller.loadUrl(
           urlRequest:
               URLRequest(url: WebUri('https://www.douyin.com/user/$secUid')));
     } catch (_) {/* 加载失败走超时 */}
 
     final sw = Stopwatch()..start();
+    final effBudget = loggedIn ? budget : const Duration(seconds: 25);
+    final maxIdle = loggedIn ? 6 : 3;
     var idleRounds = 0;
-    // 首批由页面加载时自动发出（约 1-3s）；循环做"主动 fetch + 滚动"驱动后续页
-    while (sw.elapsed < budget &&
+    while (sw.elapsed < effBudget &&
         _postItems.length < maxItems &&
         _postHasMore &&
-        idleRounds < 6) {
+        idleRounds < maxIdle) {
       _newPostsSignal = Completer<bool>();
       final before = _postItems.length;
       try {
@@ -683,9 +722,8 @@ class DouyinCapture {
         await Future.delayed(const Duration(milliseconds: 1500));
         await controller.evaluateJavascript(source: _scrollProfileJs);
       } catch (_) {}
-      var got = false;
       try {
-        got = await _newPostsSignal!.future
+        await _newPostsSignal!.future
             .timeout(const Duration(seconds: 8), onTimeout: () => false);
       } catch (_) {}
       if (_postItems.length > before) {
@@ -708,9 +746,26 @@ class DouyinCapture {
       ));
     } catch (_) {}
 
+    // ---------- ③ 结果 + 诊断 ----------
     if (_postItems.isEmpty) {
-      AppLogger.log('dy-user', '主页抓取结束：未抓到任何作品');
-      return null;
+      final nickname = _profileInfo?['nickname'];
+      final count = _profileInfo?['aweme_count'];
+      AppLogger.log('dy-user',
+          '主页抓取结束: 0 件（登录态=${loggedIn ? "已登录" : "匿名"} 昵称=$nickname 作品数=$count）');
+      if (!loggedIn) {
+        AppLogger.report('抖音主页匿名无数据: 昵称=$nickname 作品数=$count '
+            '（服务端返回空 aweme_list，需登录）');
+      } else {
+        AppLogger.report('抖音主页已登录但抓取为 0: 昵称=$nickname 作品数=$count');
+      }
+      return {
+        '__userPosts': const [],
+        '__userMore': true,
+        '__userLoggedIn': loggedIn,
+        '__userNeedLogin': !loggedIn,
+        if (nickname is String) '__userNickname': nickname,
+        if (count is num) '__userCount': (count as num).toInt(),
+      };
     }
     AppLogger.log('dy-user',
         '主页抓取结束: ${_postItems.length} 件 has_more=$_postHasMore 耗时=${sw.elapsedMilliseconds}ms');
@@ -718,6 +773,7 @@ class DouyinCapture {
       '__userPosts': _postItems.values.toList(),
       '__userMore': _postHasMore && _postItems.length < maxItems,
       '__userLoggedIn': loggedIn,
+      '__userNeedLogin': false,
       if (_profileInfo?['nickname'] is String)
         '__userNickname': _profileInfo!['nickname'] as String,
       if (_profileInfo?['aweme_count'] is num)
