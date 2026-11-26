@@ -4,10 +4,11 @@ import '../models/parsed_media.dart';
 import '../services/parser_service.dart';
 import '../services/ai_settings.dart';
 import '../services/app_logger.dart';
+import '../services/douyin_login.dart';
 import '../services/proxy_config.dart';
 import '../services/saver_channel.dart';
 import '../theme/app_theme.dart';
-import 'douyin_login_screen.dart';
+import '../widgets/douyin_login_dialog.dart';
 import 'result_screen.dart';
 
 /// 首页：粘贴链接 → 解析
@@ -28,12 +29,22 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _clipboardChecked = false;
   bool _hasProxy = false;
 
+  /// 抖音登录态（首页右上角入口显示用）+ 防重复弹窗
+  bool _dyLoggedIn = false;
+  bool _loginPrompting = false;
+
   @override
   void initState() {
     super.initState();
     _hasProxy = ProxyConfig.enabled;
     _checkClipboard();
     _showCrashLogIfAny();
+    _refreshDyLoginState();
+  }
+
+  Future<void> _refreshDyLoginState() async {
+    final ok = await DouyinLogin.checkSession();
+    if (mounted && ok != _dyLoggedIn) setState(() => _dyLoggedIn = ok);
   }
 
   /// 上次运行若发生未捕获崩溃，弹窗展示日志（方便用户截图反馈）
@@ -71,7 +82,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _parse() async {
+  Future<void> _parse({bool autoLogin = true}) async {
     FocusScope.of(context).unfocus();
     final text = _controller.text.trim();
     if (text.isEmpty) {
@@ -88,6 +99,7 @@ class _HomeScreenState extends State<HomeScreen> {
     });
     AppLogger.setContext('解析: $text');
     AppLogger.log('parse', '开始解析');
+    var needLoginNow = false;
     try {
       final result = await ParserService.parse(text);
       AppLogger.log('parse',
@@ -103,6 +115,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _error = e.message;
         _needLogin = e.needLogin;
       });
+      needLoginNow = e.needLogin && autoLogin;
     } catch (e) {
       AppLogger.log('parse', '解析异常: $e');
       AppLogger.report('解析异常: $e');
@@ -110,14 +123,75 @@ class _HomeScreenState extends State<HomeScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+    // 需要登录 → 原地弹二维码，扫完自动重试（用户要求：不要跳页）
+    // 放在 finally 之后，避免"解析转圈"盖在对话框下面
+    if (needLoginNow && mounted) await _autoLoginThenRetry();
   }
 
-  /// 需要登录时：打开扫码登录页 → 成功后自动重新解析
+  /// 解析命中"需要登录"时自动弹码；只自动弹一次，避免失败循环
+  Future<void> _autoLoginThenRetry() async {
+    if (_loginPrompting || !mounted) return;
+    _loginPrompting = true;
+    try {
+      final ok = await showDouyinLoginDialog(context,
+          reason: '抖音对未登录访问已关闭作品列表。扫码一次即可抓取该作者全部作品，'
+              '登录状态会保持，下次无需再扫。');
+      if (!ok || !mounted) return;
+      setState(() {
+        _error = null;
+        _needLogin = false;
+        _dyLoggedIn = true;
+      });
+      await _parse(autoLogin: false);
+    } finally {
+      _loginPrompting = false;
+    }
+  }
+
+  /// 需要登录时：首页原地弹二维码 → 扫码成功后自动重新解析
+  ///
+  /// 2026-11-26 改版：不再跳转整页登录（桌面登录弹窗在窄屏会溢出），
+  /// 改成弹原生二维码卡片，扫完直接接着解析，不打断操作流。
   Future<void> _loginThenRetry() async {
-    final ok = await Navigator.of(context).push<bool>(
-        MaterialPageRoute(builder: (_) => const DouyinLoginScreen()));
-    if (ok != true || !mounted) return;
-    await _parse();
+    final ok = await showDouyinLoginDialog(context);
+    if (!ok || !mounted) return;
+    setState(() {
+      _error = null;
+      _needLogin = false;
+      _dyLoggedIn = true;
+    });
+    await _parse(autoLogin: false);
+  }
+
+  /// 右上角「抖音」按钮：已登录只提示，未登录弹码
+  Future<void> _openDyLogin() async {
+    if (_dyLoggedIn) {
+      final again = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('抖音已登录'),
+          content: const Text('当前已有登录态，主页作品可抓全量。'
+              '如遇到抓取不全，可重新扫码换一个账号。'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('关闭')),
+            FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('重新扫码')),
+          ],
+        ),
+      );
+      if (again != true || !mounted) return;
+    }
+    final ok = await showDouyinLoginDialog(context, relogin: _dyLoggedIn);
+    if (!mounted) return;
+    if (ok) {
+      setState(() => _dyLoggedIn = true);
+    } else {
+      // 换号时可能清了旧 cookie 又没扫新码 → 状态可能已变，重新读一次
+      _refreshDyLoginState();
+    }
   }
 
   Future<void> _openAiSettings() async {
@@ -260,6 +334,15 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: const Text('原存'),
         actions: [
+          // 抖音登录入口（未登录时高亮，点了原地弹二维码）
+          IconButton(
+            tooltip: _dyLoggedIn ? '抖音已登录（点击可换号）' : '扫码登录抖音（抓取作者全部作品）',
+            icon: Icon(_dyLoggedIn ? Icons.qr_code_2 : Icons.qr_code,
+                color: _dyLoggedIn
+                    ? AppColors.success
+                    : AppColors.textTertiary),
+            onPressed: _openDyLogin,
+          ),
           IconButton(
             tooltip: '设置（AI 去水印 / 微博取图）',
             icon: Icon(
@@ -321,22 +404,25 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(height: AppSpacing.s),
               Text(_error!,
                   style: AppText.body.copyWith(color: AppColors.danger)),
-              // 需要登录（抖音主页）→ 直达扫码登录，成功后自动重试
+              // 需要登录（抖音主页）→ 原地弹二维码扫码，成功后自动重试
               if (_needLogin) ...[
+                const SizedBox(height: AppSpacing.s),
+                Text('抖音对未登录访问已关闭作品列表，扫码后即可抓取全部作品。',
+                    style: AppText.caption),
                 const SizedBox(height: AppSpacing.m),
                 SizedBox(
                   width: double.infinity,
                   child: FilledButton.icon(
                     onPressed: _loading ? null : _loginThenRetry,
-                    icon: const Icon(Icons.login, size: 18),
-                    label: const Text('登录抖音后重试'),
+                    icon: const Icon(Icons.qr_code_2, size: 18),
+                    label: const Text('扫码登录抖音并重试'),
                   ),
                 ),
               ],
             ],
             const SizedBox(height: AppSpacing.l),
             FilledButton(
-              onPressed: _loading ? null : _parse,
+              onPressed: _loading ? null : () => _parse(),
               child: _loading
                   ? const SizedBox(
                       width: 22, height: 22,
@@ -345,6 +431,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   : const Text('开始解析'),
             ),
             const SizedBox(height: AppSpacing.xxl),
+            _DyLoginCard(
+              loggedIn: _dyLoggedIn,
+              onTap: _openDyLogin,
+            ),
+            const SizedBox(height: AppSpacing.xl),
             Row(
               children: [
                 Text('支持的平台', style: AppText.subtitle),
@@ -373,6 +464,66 @@ class _HomeScreenState extends State<HomeScreen> {
                 ],
               ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 首页抖音登录卡片：未登录时引导扫码，已登录时展示状态
+class _DyLoginCard extends StatelessWidget {
+  final bool loggedIn;
+  final VoidCallback onTap;
+  const _DyLoginCard({required this.loggedIn, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(AppRadius.card),
+      child: Container(
+        padding: const EdgeInsets.all(AppSpacing.l),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(AppRadius.card),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: loggedIn
+                    ? AppColors.success.withOpacity(0.12)
+                    : AppColors.primary.withOpacity(0.10),
+                borderRadius: BorderRadius.circular(AppRadius.chip),
+              ),
+              child: Icon(
+                  loggedIn ? Icons.check_circle : Icons.qr_code_2,
+                  size: 22,
+                  color: loggedIn ? AppColors.success : AppColors.primary),
+            ),
+            const SizedBox(width: AppSpacing.m),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(loggedIn ? '抖音已登录' : '登录抖音（扫码）',
+                      style: AppText.body
+                          .copyWith(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 2),
+                  Text(
+                    loggedIn
+                        ? '可抓取作者主页的全部作品'
+                        : '抖音已限制未登录访问，扫码后才能抓全部作品',
+                    style: AppText.caption,
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.chevron_right,
+                size: 18, color: AppColors.textTertiary),
           ],
         ),
       ),
