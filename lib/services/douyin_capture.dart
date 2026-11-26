@@ -54,14 +54,19 @@ try {
 })();
 ''';
 
-/// 抖音作者主页抓取（2026-11-12 新增）：
+/// 抖音作者主页抓取（2026-11-12 新增，build 121 重写驱动）
 ///   桌面 /user/{secUid} 页自己发的 aweme/post 请求带 a_bogus 签名且响应完整
-///   （bit_rate 10 档 + play_addr 3 url + music + images，实测探测确认），
-///   匿名首批 20 条；移动 v2 API 翻页被锁且无 play_addr，不可用。
-///   抓取策略 = hook 截获页面 post 响应 + 主动 fetch 翻页（免签尝试，detail
-///   接口实测免签，post 可能同样免签）+ 程序化滚动驱动（页面自己发签名请求）
-///   + 匿名登录墙移除（.douyin_login_new_class 的 fixed 祖先 remove）。
-///   匿名被服务端锁 20 条时返回 hasMore=true，由上层提示"登录后可抓全部"。
+///   （bit_rate 10 档 + play_addr 3 url + music + images，实测探测确认）。
+///
+///   抓取策略只有一条：**hook 截获页面自己发的（带签名的）post 响应**
+///   + 程序化滚动驱动。页面自己发请求时 a_bogus 与完整参数强绑定
+///   （实测 184 字符；用 byted_acrawler.frontierSign 重放、改 max_cursor、
+///   去掉 a_bogus 等 5 种变体，一律返回 846KB HTML 风控页而非 JSON），
+///   所以**自建 fetch 翻页已被证实无效，v4 起彻底移除**（build 119 前是死代码）。
+///
+///   匿名（未登录）：2026-11-26 实测服务端直接返回空列表
+///   （`aweme_list:[]` + `has_more:0` + not_login_module），页面根本不会翻页，
+///   滚动再多次也没用 → 必须登录。登录态下 has_more 才为 true、滚动才触发翻页。
 const _profileHookJs = '''
 (function(){
   if (window.__profInstalled) return; window.__profInstalled = true;
@@ -119,48 +124,155 @@ const _profileHookJs = '''
 })();
 ''';
 
-/// 主动 fetch post 接口翻页（页面上下文，带页面 cookie；
-/// 与 detail 同思路 —— 可能免签，失败则由滚动驱动兜底）
-String _pullPostsJs(String secUid, int maxCursor) => '''
-(function(){
-try {
-  var u = 'https://www.douyin.com/aweme/v1/web/aweme/post/?device_platform=webapp&aid=6383'
-    + '&channel=channel_pc_web&sec_user_id=' + encodeURIComponent('$secUid')
-    + '&max_cursor=$maxCursor&count=20'
-    + '&pc_client_type=1&version_code=170400&version_name=17.4.0'
-    + '&cookie_enabled=true&platform=PC&downlink=10';
-  fetch(u, {credentials:'include'})
-    .then(function(r){ return r.text(); })
-    .then(function(t){
-      if (t && t.indexOf('aweme_list') >= 0 && !window.__profPulled$maxCursor) {
-        window.__profPulled$maxCursor = true;
-        window.flutter_inappwebview.callHandler('capPosts', t);
-      }
-    })
-    .catch(function(){});
-} catch(e){}
-})();
-''';
+/// ⛔ 已废弃（build 121 删除）：自建 fetch 主动翻页
+///
+/// 2026-11-26 实测证明这条路走不通 —— 保留注释只为防止以后有人又加回来：
+///   页面自己发的 post 请求带 **184 字符 a_bogus**（byted_acrawler.frontierSign
+///   生成，且与 url 全部参数强绑定）。在页面上下文里重放同样 URL、或改用
+///   frontierSign 重新签名、或改 max_cursor、或去掉 a_bogus，共测 5 种变体，
+///   **全部返回 846KB HTML（风控页），没有一个拿到 JSON**。
+///   → 唯一可行路径是让页面自己发请求（滚动驱动懒加载）+ hook 截获响应。
+///   （原 `_pullPostsJs` 用裸拼 URL 免签 fetch，也从没成功过，是死代码。）
 
-/// 程序化滚动驱动 v3（build 119）：
-///   v2 遍历 `div,section,main` 全 DOM 读 scrollHeight —— 抖音主页数千元素，
-///   每次读都强制 layout，真机 WebView 会卡死/JSEvaluate 超时（build 118 教训）。
-///   v3 只操作 window + document.scrollingElement + 至多 12 个 scroll/list 候选，
-///   不再全 DOM 遍历；保留 WheelEvent（真实滚轮事件才是懒加载触发源）
-///   与"加载更多"按钮点击、登录墙移除。
+/// 程序化滚动驱动 v4（build 121，2026-11-26 实测重写）
+///
+/// v3 的两个致命错误（playwright 实测坐实，这就是"作品爬不全"的真因）：
+///
+///  ① **window.scrollBy / document.scrollingElement 完全无效**
+///     抖音桌面页 `body{overflow-y:hidden}`，根元素 sh==ch==900，
+///     实测 `window.scrollBy(0,2600)` 后 `window.scrollY` 仍是 0。
+///     v3 把这三者当主力兜底 → 实际一下都没滚动。
+///
+///  ② **真容器是混淆类名 `yP5MkONE`，v3 的候选选择器匹配不到**
+///     实测（1280x900）真正可滚的两个容器：
+///       `div.yP5MkONE`（作品网格，sh=1718 ch=784，行程 934）
+///       `div.parent-route-container...route-scroll-container`（行程 336）
+///     v3 只取 `[class*="scroll"] / [class*="list"]` —— 后者能命中
+///     route-scroll-container，但**作品网格 yP5MkONE 被漏掉**，而那才是装着
+///     作品卡片、监听懒加载的元素。实测 scrollTop 设到 934 后 1.2s 稳定不回弹。
+///
+/// v4 探测方式：`elementFromPoint` 上溯是**不可靠的**（实测 6 个采样点全部
+///   零命中 —— 页面上有 fixed 遮罩/浮层，命中点在容器之外就断链到 body，
+///   而 body 不可滚）。改用**定向选择器 + 有限深度遍历**：
+///     · 先按已知特征选择器找（快，通常一次命中）
+///     · 未命中时，只在 `main/内容区` 的子树里做一层有限遍历（≤300 节点），
+///       不碰 v2 那种全 DOM 数千节点（真机 WebView 会卡死）
+///   结果缓存到 `window.__capCands`，节点仍 connected 就复用。
 const _scrollProfileJs = '''
 (function(){
+  // 1) 拆登录墙（fixed 祖先）
   try {
-    var n = document.querySelector('.douyin_login_new_class');
-    if (n) {
-      var a = n;
+    var wall = document.querySelector('.douyin_login_new_class');
+    if (wall) {
+      var a = wall;
       while (a && a !== document.body) {
-        var st = getComputedStyle(a);
-        if (st.position === 'fixed') { a.remove(); break; }
+        if (getComputedStyle(a).position === 'fixed') { a.remove(); break; }
         a = a.parentElement;
       }
     }
   } catch(e){}
+
+  function isScroller(el) {
+    try {
+      var st = getComputedStyle(el);
+      var oy = st.overflowY;
+      // 阈值放宽到 20：390 视口下作品网格初始 range 可能只有 57px
+      return (oy === 'auto' || oy === 'scroll' || oy === 'overlay')
+          && el.scrollHeight > el.clientHeight + 20
+          && el.clientHeight > 80;
+    } catch(e) { return false; }
+  }
+
+  var cands = [];
+  // 2) 复用缓存（节点被重建则丢弃）
+  var cached = window.__capCands;
+  if (cached && cached.length) {
+    for (var i = 0; i < cached.length; i++) {
+      try { if (cached[i] && cached[i].isConnected && isScroller(cached[i])) cands.push(cached[i]); } catch(e){}
+    }
+  }
+
+  // 3) 已知特征选择器（快路，通常能先拿到 route-scroll-container）
+  var sels = [
+    '[class*="route-scroll-container"]',
+    '[class*="scroll-container"]',
+    '[class*="scrollContainer"]',
+    '[data-e2e="user-post-list"]',
+    '[class*="user-post"]',
+    '[class*="waterfall"]'
+  ];
+  for (var s = 0; s < sels.length; s++) {
+    try {
+      var nodes = document.querySelectorAll(sels[s]);
+      for (var k = 0; k < nodes.length && k < 8; k++) {
+        if (isScroller(nodes[k])) {
+          var dup0 = false;
+          for (var z = 0; z < cands.length; z++) { if (cands[z] === nodes[k]) dup0 = true; }
+          if (!dup0) cands.push(nodes[k]);
+        }
+      }
+    } catch(e){}
+  }
+
+  // 3b) 关键补充：作品网格用的是**混淆类名**（实测 `div.yP5MkONE`），
+  //     任何语义选择器都匹配不到，只有遍历才找得到。
+  //     实测：用 DFS(`stack.pop`) 时 body 有 173 个子节点，预算全被尾部
+  //     叶子节点吃掉 → 一个都找不到；改 **BFS + 跳过叶子节点**（可滚容器
+  //     必然有子元素）后能稳定命中 2 个真容器（含作品网格）。
+  //     `main` 在抖音主页**不存在**（实测），所以根只能从 body 起。
+  if (cands.length < 2) {
+    try {
+      var q = [document.body];
+      var head = 0;
+      var budget = 420;
+      while (head < q.length && budget > 0) {
+        var cur = q[head++];
+        budget--;
+        try {
+          var kids = cur.children;
+          if (kids.length === 0) continue;   // 叶子不必读样式，省开销
+          if (isScroller(cur)) {
+            var dup1 = false;
+            for (var z2 = 0; z2 < cands.length; z2++) { if (cands[z2] === cur) dup1 = true; }
+            if (!dup1) cands.push(cur);
+          }
+          for (var c2 = 0; c2 < kids.length; c2++) q.push(kids[c2]);
+        } catch(e){}
+        if (cands.length >= 4) break;
+      }
+    } catch(e){}
+  }
+
+  try { if (cands.length) window.__capCands = cands; } catch(e){}
+
+  // 5) 逐个滚到底 + 在容器上派发 wheel（懒加载监听挂在容器上才生效）
+  //
+  //    ⚠️ 关键细节：如果容器**已经停在底部**（上一轮滚到底后页面还没追加内容），
+  //    再把 scrollTop 设成同一个值**不会产生新的 scroll 事件**，
+  //    IntersectionObserver / scroll 监听都不会触发 → 懒加载卡死不翻页。
+  //    所以先往回弹 260px 再滚到底，强制制造一次真实位移。
+  var moved = 0, tops = [];
+  for (var j = 0; j < cands.length; j++) {
+    var el2 = cands[j];
+    try {
+      var target = el2.scrollHeight - el2.clientHeight;
+      if (target <= 0) { tops.push('0/0'); continue; }
+      var curTop = el2.scrollTop;
+      if (curTop >= target - 8) {
+        // 已在底部 → 先回弹
+        el2.scrollTop = Math.max(0, target - 260);
+        el2.dispatchEvent(new Event('scroll', {bubbles: true}));
+      }
+      el2.scrollTop = target;
+      if (el2.scrollTop !== curTop) moved++;
+      tops.push(el2.scrollTop + '/' + target);
+      el2.dispatchEvent(new WheelEvent('wheel',
+          {deltaY: 1200, bubbles: true, cancelable: true, view: window}));
+      el2.dispatchEvent(new Event('scroll', {bubbles: true}));
+    } catch(e){}
+  }
+
+  // 6) window 级兜底（根元素通常不可滚，但布局可能变）
   try {
     window.dispatchEvent(new WheelEvent('wheel',
         {deltaY: 2400, bubbles: true, cancelable: true, view: window}));
@@ -170,24 +282,14 @@ const _scrollProfileJs = '''
     }
   } catch(e){}
   try { window.scrollBy(0, 2600); } catch(e){}
-  try {
-    var cands = [document.scrollingElement, document.documentElement, document.body];
-    var extra = document.querySelectorAll('[class*="scroll"],[class*="list"],[tabindex="-1"]');
-    for (var i = 0; i < extra.length && i < 12; i++) cands.push(extra[i]);
-    for (var j = 0; j < cands.length; j++) {
-      var el = cands[j];
-      try {
-        if (el && el.scrollHeight > el.clientHeight + 200) {
-          el.scrollTop = el.scrollHeight - 200;
-        }
-      } catch(e){}
-    }
-  } catch(e){}
+
+  // 7) "加载更多"按钮
   try {
     var btns = document.querySelectorAll('[class*="load-more"],[class*="loadMore"]');
-    for (var i = 0; i < btns.length; i++) { btns[i].click(); }
+    for (var b = 0; b < btns.length; b++) { btns[b].click(); }
   } catch(e){}
-  return 1;
+
+  return JSON.stringify({cands: cands.length, moved: moved, tops: tops});
 })();
 ''';
 
@@ -632,27 +734,27 @@ class DouyinCapture {
     }
   }
 
-  /// 抓取作者主页全部作品（2026-11-12 新增，build 119 重构）。
+  /// 抓取作者主页全部作品（2026-11-12 新增；119 重构；121 修滚动驱动）。
   ///
   /// 2026-11-26 实测（关键变化）：抖音已对**匿名**用户彻底关闭作品列表 ——
   ///   桌面 aweme/post 返回 {"aweme_list":[], "has_more":0,
-  ///   "not_login_module":{"guide_login_tip_exist":true}}（1027 字节空体）
+  ///   not_login_module:{guide_login_tip_exist:true}}（1027 字节空体）
   ///   移动 v2 仅 6 条、条目无 play_addr、翻页直接 status_code 11110 shark_fail_1
   ///   → **登录是唯一可靠路径**。新版桌面页也已无 _ROUTER_DATA / userInfo，
   ///   作者信息只能从移动分享页 userInfoRes.user_info 拿。
   ///
   /// 流程：
   ///   ① 读登录态 → ② 移动分享页取作者昵称/作品数（iPhone UA）
-  ///   → ③ 桌面主页 hook 截获 post 响应 + 免签 fetch + 滚动驱动（桌面 UA）
-  ///     · 已登录：budget 150s、空转容忍 6 轮（128 件 ≈ 7 页）
-  ///     · 匿名：只跑 25s 快速判定（服务端必返回空列表），不空等
+  ///   → ③ 桌面主页 hook 截获页面自己发的 post 响应 + 滚动驱动（桌面 UA）
+  ///     · 已登录：budget 240s、空转容忍 8 轮（滚动 v4 已修好，多给翻页时间）
+  ///     · 匿名：只跑 20s 快速判定（服务端必返回空列表），不空等
   ///   → ④ 空结果时 report 诊断 → 上层据 __userNeedLogin 引导登录
   ///
   /// 返回 {'__userPosts': [...], '__userMore': bool, '__userLoggedIn': bool,
   ///        '__userNeedLogin': bool, '__userNickname'?, '__userCount'?}
   Future<Map<String, dynamic>?> captureUserProfile(String secUid,
-      {Duration budget = const Duration(seconds: 150),
-      int maxItems = 600}) async {
+      {Duration budget = const Duration(seconds: 240),
+      int maxItems = 800}) async {
     final controller = _controller;
     if (controller == null) return null;
     _runId++;
@@ -705,35 +807,47 @@ class DouyinCapture {
     } catch (_) {/* 加载失败走超时 */}
 
     final sw = Stopwatch()..start();
-    final effBudget = loggedIn ? budget : const Duration(seconds: 25);
-    final maxIdle = loggedIn ? 6 : 3;
+    final effBudget = loggedIn ? budget : const Duration(seconds: 20);
+    final maxIdle = loggedIn ? 8 : 3;
     var idleRounds = 0;
+    var round = 0;
     while (sw.elapsed < effBudget &&
         _postItems.length < maxItems &&
         _postHasMore &&
         idleRounds < maxIdle) {
+      round++;
       _newPostsSignal = Completer<bool>();
       final before = _postItems.length;
+      // 只靠页面自己发的签名请求（滚动驱动，见 _scrollProfileJs 的说明）。
+      String diag = '';
       try {
-        await controller.evaluateJavascript(
-            source: _pullPostsJs(secUid, _postCursor));
-        await controller.evaluateJavascript(source: _scrollProfileJs);
-        // 一轮内二次滚动：页面往往需要连续滚动才触发下一页加载
+        final r1 = await controller.evaluateJavascript(source: _scrollProfileJs);
+        diag = (r1 ?? '').toString();
+        // 一轮内二次滚动：连续滚动才稳定触发下一页
         await Future.delayed(const Duration(milliseconds: 1500));
         await controller.evaluateJavascript(source: _scrollProfileJs);
-      } catch (_) {}
+      } catch (e) {
+        AppLogger.log('dy-user', '第 $round 轮滚动异常: $e');
+      }
+      if (round <= 2 && diag.isNotEmpty) {
+        AppLogger.log('dy-user', '第 $round 轮滚动诊断: $diag');
+      }
       try {
         await _newPostsSignal!.future
-            .timeout(const Duration(seconds: 8), onTimeout: () => false);
+            .timeout(const Duration(seconds: 9), onTimeout: () => false);
       } catch (_) {}
       if (_postItems.length > before) {
         idleRounds = 0;
       } else {
         idleRounds++;
         AppLogger.log('dy-user',
-            '第 $idleRounds 轮无新增（has_more=$_postHasMore cursor=$_postCursor 已抓${_postItems.length}）');
+            '第 $round 轮无新增（空转$idleRounds/$maxIdle has_more=$_postHasMore '
+            'cursor=$_postCursor 已抓${_postItems.length}）');
       }
     }
+    AppLogger.log('dy-user',
+        '抓取循环结束: $round 轮 耗时=${sw.elapsed.inSeconds}s '
+        '已抓${_postItems.length} has_more=$_postHasMore');
 
     // 用完立刻恢复基线 iPhone UA（不影响 iesdouyin 主路）
     try {
