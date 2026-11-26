@@ -4,6 +4,7 @@ import 'parsers/xiaohongshu_parser.dart';
 import 'parsers/weibo_parser.dart';
 import 'parsers/xianyu_parser.dart';
 import 'parsers/twitter_parser.dart';
+import 'parsers/bilibili_parser.dart';
 
 /// 解析调度器：识别链接所属平台，路由到对应解析器
 class ParserService {
@@ -13,6 +14,7 @@ class ParserService {
     ParsePlatform.weibo: WeiboParser(),
     ParsePlatform.xianyu: XianyuParser(),
     ParsePlatform.twitter: TwitterParser(),
+    ParsePlatform.bilibili: BilibiliParser(),
   };
 
   static ParsePlatform detect(String url) {
@@ -31,8 +33,16 @@ class ParserService {
       return ParsePlatform.weibo;
     }
     if (host.contains('goofish.com') || host.contains('idle.fish') ||
-        host.contains('taobao.com') || host.contains('2taobao.net')) {
+        host.contains('taobao.com') || host.contains('2taobao.net') ||
+        host.contains('m.tb.cn') || host.contains('tb.cn')) {
       return ParsePlatform.xianyu;
+    }
+    // B 站：www/m 主站 + 短链 b23.tv + 各类子域（live/space/bangumi 等）
+    if (host.contains('bilibili.com') ||
+        host == 'b23.tv' ||
+        host.endsWith('.b23.tv') ||
+        host.contains('b23.tv')) {
+      return ParsePlatform.bilibili;
     }
     // X（推特）：x.com / twitter.com / 短链 t.co / 各类镜像域名
     if (host == 'x.com' ||
@@ -55,7 +65,8 @@ class ParserService {
     }
     final platform = detect(url);
     if (platform == ParsePlatform.unknown) {
-      throw ParseException('暂不支持该链接：仅支持小红书 / 微博 / 抖音 / 闲鱼 / X 分享链接');
+      throw ParseException(
+          '暂不支持该链接：仅支持小红书 / 微博 / 抖音 / 闲鱼 / B 站 / X 分享链接');
     }
     return _parsers[platform]!.parse(url);
   }
