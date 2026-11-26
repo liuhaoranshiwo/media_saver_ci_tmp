@@ -84,7 +84,12 @@ class ParseResult {
 
 class ParseException implements Exception {
   final String message;
-  ParseException(this.message);
+
+  /// 需要登录才能解析（首页据此渲染"登录"按钮，登录后自动重试）
+  /// 2026-11-26：抖音匿名已不返回主页作品列表，只有登录后才能抓取
+  final bool needLogin;
+
+  ParseException(this.message, {this.needLogin = false});
   @override
   String toString() => message;
 }
