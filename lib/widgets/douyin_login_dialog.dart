@@ -69,9 +69,10 @@ class _DouyinLoginDialogState extends State<_DouyinLoginDialog> {
     final existing = DouyinLogin.instance.lastQr;
     if (existing != null) _decode(existing);
     _sub = DouyinLogin.instance.qrStream.listen(_onQr);
-    // 页面 JS 侧确认登录（比 cookie 轮询更快）
+    // 页面 JS 疑似登录（"登录成功"文案出现）→ 立刻查一次 cookie 做权威判定，
+    // 不能直接判定成功（用户可能还没在手机 App 里点确认）
     _loginSub = DouyinLogin.instance.loginStream.listen((_) {
-      if (mounted) _onLoggedIn('page-js');
+      if (mounted) _checkSession();
     });
     _boot();
     _poll = Timer.periodic(const Duration(seconds: 2), (_) => _checkSession());
@@ -147,7 +148,7 @@ class _DouyinLoginDialogState extends State<_DouyinLoginDialog> {
     }
   }
 
-  /// 统一收口：无论 JS 上报还是 cookie 轮询发现，都走这里
+  /// 统一收口：cookie 确认存在登录态后走这里
   Future<void> _onLoggedIn(String from) async {
     if (_success || !mounted) return;
     setState(() => _success = true);
