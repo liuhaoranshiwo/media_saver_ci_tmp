@@ -6,10 +6,11 @@ import '../models/parsed_media.dart';
 import '../services/ai_inpaint_service.dart';
 import '../services/ai_settings.dart';
 import '../services/downloader.dart';
+import '../services/douyin_login.dart';
 import '../services/parser_service.dart';
 import '../services/saver_channel.dart';
 import '../theme/app_theme.dart';
-import 'douyin_login_screen.dart';
+import '../widgets/douyin_login_dialog.dart';
 
 /// 解析结果页：媒体网格 + 点按预览 + 长按多选 + 保存
 ///
@@ -263,14 +264,15 @@ class _ResultScreenState extends State<ResultScreen> {
     });
   }
 
-  /// 抖音主页结果不完整 → 已登录直接重抓；未登录先扫码登录再重抓
+  /// 抖音主页结果不完整 → 已登录直接重抓；未登录先弹二维码登录再重抓
   Future<void> _refetchAll() async {
     if (_refetching) return;
-    final hasSession = await DouyinLoginScreen.checkLoggedIn();
+    final hasSession = await DouyinLogin.checkSession();
     if (!hasSession) {
-      final ok = await Navigator.of(context).push<bool>(
-          MaterialPageRoute(builder: (_) => const DouyinLoginScreen()));
-      if (ok != true || !mounted) return;
+      if (!mounted) return;
+      final ok = await showDouyinLoginDialog(context,
+          reason: '登录后才会返回该作者的全部作品；扫码一次即可，之后保持登录。');
+      if (!ok || !mounted) return;
     }
     if (!mounted) return;
     setState(() => _refetching = true);
