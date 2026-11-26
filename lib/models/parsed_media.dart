@@ -4,7 +4,15 @@ library;
 
 enum MediaKind { image, video, livePhoto }
 
-enum ParsePlatform { douyin, xiaohongshu, weibo, xianyu, twitter, unknown }
+enum ParsePlatform {
+  douyin,
+  xiaohongshu,
+  weibo,
+  xianyu,
+  twitter,
+  bilibili,
+  unknown,
+}
 
 class ParsedMediaItem {
   final MediaKind kind;
