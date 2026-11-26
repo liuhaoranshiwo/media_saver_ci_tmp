@@ -225,39 +225,68 @@ class DouyinParser extends MediaParser {
     //   「抓取被 maxIdle/预算截断、但服务端 has_more 恰好已是 false」时
     //   **静默少给作品**（用户看到的就是"作品爬不全"却没有任何提示）。
     //   现在改为：只要「已抓数量 < 作者作品总数」就提示，不再依赖 has_more。
+    //
+    // ⚠️ build 122 修正（用户真机反馈"结果页数量对不上"）：
+    //   ① `aweme_count` 是**账号总量**，含私密/审核中/仅好友可见的作品，
+    //      `aweme/post` 永远取不到这些 → 它只能当"参考上限"，**不能当应抓数**。
+    //      原来 `grabbed >= total` 就断言"已抓取全部"，反而会漏报；
+    //      真正的完成依据是服务端 `has_more == false`。
+    //   ② `posts.length` 是**作品数**，`items.length` 是**媒体项数**
+    //      （一个图集作品可含 3 个视频项），两者天生不等 —— 文案必须点明。
     String? notice;
     final loggedIn = cap['__userLoggedIn'] == true;
     final total = totalCount ?? 0;
-    final grabbed = posts.length;
+    final grabbed = posts.length;          // 作品数
+    final itemCount = items.length;        // 媒体项数（图集会多于作品数）
+    final complete = cap['__userComplete'] == true; // 服务端明确无下一页
     final looksShort = total > 0 && grabbed < total;
-    if (looksShort || hasMore) {
-      final withTotal = total > grabbed && total > 0;
-      if (!loggedIn) {
-        notice = withTotal
-            ? '当前未登录抖音，只能抓取最近 $grabbed 件（作者共发布 $total 件）。'
-                '点下方登录后自动抓取全部作品'
-            : '当前未登录抖音，仅抓取到 $grabbed 件。点下方登录后自动抓取全部作品';
-      } else {
-        notice = withTotal
-            ? '已抓取 $grabbed 件（作者共 $total 件）。'
-            '${hasMore ? "翻页提前结束（网络或风控）" : "未能抓全，可能是平台限流"}，'
-                '可点下方重新抓取'
-            : '翻页提前结束（网络或风控），已抓 $grabbed 件，可点下方重新抓取';
+    // 完成判定：服务端说没下一页了才算抓全（maxItems 截断不算）
+    final reallyComplete = complete && !hasMore;
+    if (reallyComplete && !looksShort) {
+      // 服务端到底了，且数量也对得上 → 唯一能宣称"全部"的情况
+      notice = '已抓取该作者全部 $grabbed 件作品'
+          '${itemCount != grabbed ? "，共 $itemCount 个媒体文件（图集合集/实况会拆成多项）" : ""}';
+    } else if (reallyComplete && looksShort) {
+      // 服务端到底了，但仍少于账号总数 → 差额是取不到的作品（私密/审核中/仅好友）
+      // 这类差额重抓也拿不到，所以 complete 仍为 true，不给重抓入口 ——
+      // 文案不能写"可点下方重新抓取"（按钮不会出现，会自相矛盾）
+      notice = '已抓取 $grabbed 件公开作品'
+          '（账号共 $total 件）'
+          '，差额可能是私密/审核中/仅好友可见的作品，这部分无法抓取。'
+          '${itemCount != grabbed ? "共 $itemCount 个媒体文件。" : ""}';
+    } else if (!loggedIn) {
+      notice = total > grabbed && total > 0
+          ? '当前未登录抖音，只能抓取最近 $grabbed 件（账号共 $total 件）。'
+              '点下方登录后自动抓取全部公开作品'
+          : '当前未登录抖音，仅抓取到 $grabbed 件。点下方登录后自动抓取全部作品';
+    } else {
+      notice = (total > grabbed && total > 0)
+          ? '已抓取 $grabbed 件（账号共 $total 件）—— 翻页提前结束'
+              '（网络/风控/轮次用尽），可点下方重新抓取'
+          : '翻页提前结束（网络/风控/轮次用尽），已抓 $grabbed 件，可点下方重新抓取';
+      if (itemCount != grabbed) {
+        notice = '$notice（共 $itemCount 个媒体文件）';
       }
-    } else if (total > 0 && grabbed >= total) {
-      notice = '已抓取该作者全部 $grabbed 件作品';
     }
+
+    // 标题也改用「作品数 + 媒体项数」双口径，避免用户把媒体项当成作品数
+    final titleBase = nickname.isEmpty ? '作者主页作品' : '$nickname 的作品';
+    final titleSuffix = itemCount != grabbed
+        ? '（$grabbed 件作品 · $itemCount 个文件）'
+        : '（$grabbed 件）';
 
     return ParseResult(
       platform: ParsePlatform.douyin,
       sourceUrl: sourceUrl,
-      title: nickname.isEmpty
-          ? '作者主页作品（${posts.length} 件）'
-          : '$nickname 的作品（${posts.length} 件）',
+      title: '$titleBase$titleSuffix',
       author: nickname,
       items: items,
       parsedAt: DateTime.now(),
       notice: notice,
+      // 只有「服务端到底 + 数量对得上」才算真正抓全；
+      // 「到底但少于账号总数」差额是取不到的私密作品，重抓也没用 → 同样不给重抓
+      complete: reallyComplete,
+      isProfile: true,
     );
   }
 
