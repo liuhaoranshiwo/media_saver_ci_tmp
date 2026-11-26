@@ -150,6 +150,18 @@ flutter build ipa --release --no-codesign   # 巨魔安装无需签名
 
 ## 变更记录
 
+- **v1.2.0 (build 119)**
+  - 抖音主页：**必须登录**（2026-11-26 实测平台已对匿名关闭作品列表）
+    - 桌面 `aweme/post` 匿名返回 `{"aweme_list":[],"has_more":0,
+      "not_login_module":{"guide_login_tip_exist":true}}`（1027B 空体）
+    - 移动 v2 匿名仅 6 条、条目无 `play_addr`、翻页 `status_code 11110 shark_fail_1`
+    - 新增：识别到"需要登录"时首页错误区直接给「登录抖音后重试」按钮，
+      扫码成功自动重新解析（不再出现"解析失败且无入口"）
+  - 新版桌面页已无 `_ROUTER_DATA`（只有不含作者信息的 `RENDER_DATA`）→
+    作者昵称/作品数改从移动分享页 `userInfoRes.user_info` 读取（先加载移动页再切桌面）
+  - 滚动驱动 v3：修掉 v2 遍历全 DOM（`div,section,main`）导致的 layout 风暴
+    （真机 WebView 卡死/JS 超时），只操作 window + scrollingElement + ≤12 个候选容器
+  - 匿名时只探测 25s（服务端必返回空），不空等 150s；空结果写入诊断日志
 - **v1.2.0 (build 118)**
   - 抖音主页抓取调优（真机反馈"抓不全"）：
     - 滚动驱动升级：`scrollBy` 不触发 wheel 事件（探测的翻页请求是真实滚轮
